@@ -1,0 +1,68 @@
+# Breakfast Manager — tablet app
+
+This is the stand-alone version for **one shared Android tablet**. It needs no laptop and no server:
+
+- All accounts, shifts and statistics are saved **on the tablet itself**.
+- It works **without internet** once installed.
+- It has the same screens as the laptop version: guest list import (TXT/PDF), check-in, unknown guests, late guests, finish shift, previous shifts, analytics, CSV exports, delete shift with a code.
+
+The app's *code* is put on a free website (GitHub Pages) only so the tablet can install it. **No guest data ever goes there.**
+
+---
+
+## Part 1 — Put the app online (once, about 15 minutes, on your laptop)
+
+1. Go to **https://github.com** and create a free account (Sign up). Confirm your email.
+2. Click the **+** at the top right → **New repository**.
+   - Repository name: `breakfast`
+   - Choose **Public** (GitHub Pages is free for public repositories; the code contains no guest data and no codes).
+   - Don't tick anything else. Click **Create repository**.
+3. On the next page, click the link **“uploading an existing file”**.
+4. Open this `tablet-app` folder in File Explorer, select **everything inside it** (Ctrl + A), and drag it onto the GitHub page. Folders (`css`, `js`, `img`, `icons`, `vendor`) are uploaded too. Wait until every file is listed.
+5. Scroll down and click **Commit changes**.
+6. Go to **Settings** (tab at the top of the repository) → **Pages** (left menu).
+   - Under **Build and deployment → Source**, choose **Deploy from a branch**.
+   - Branch: **main**, folder: **/ (root)** → **Save**.
+7. Wait 1–2 minutes and refresh. GitHub shows your address, for example:
+   `https://YOUR-USERNAME.github.io/breakfast/`
+
+## Part 2 — Install it on the tablet
+
+1. On the Android tablet, open **Chrome** and go to your address from step 7.
+2. Tap **Install** on the bar at the bottom of the screen.
+   If the bar doesn't appear: tap **⋮** (top right) → **Install app** (or **Add to Home screen → Install**).
+3. Open **Breakfast Manager** from the home screen or the app drawer. It opens full-screen like any app.
+4. **Set up the tablet:** create the manager account, choose the employee access code and the delete code.
+5. Optional: **Settings → App settings** to set the name (e.g. *Hilton Breakfast*) and upload your logo *on the tablet*. The logo is stored on the tablet only, not on the website.
+
+Employees then tap **Create Account** and use the employee access code. A login lasts 12 hours, so on a shared tablet each person should **log out** when they finish.
+
+---
+
+## Backups — important
+
+Everything lives only on this tablet. If the tablet breaks, is reset, or the app is uninstalled, the data is gone unless you have a backup.
+
+- **Settings → Backup & restore → Download backup** saves a file such as `breakfast-backup-2026-11-14.json` to the tablet's Downloads.
+- Keep a copy somewhere else: email it to yourself, or upload it to Google Drive.
+- Managers see a reminder on the Home screen if there's been no backup for 7 days.
+- **New or reset tablet:** install the app (Part 2), and on the setup screen tap **Restore a backup file**.
+
+Never use Chrome's **Clear browsing data → Site data** or **Clear storage** for this app on the tablet; that deletes the saved shifts.
+
+## Updating the app later
+
+Upload the changed files to the same GitHub repository (**Add file → Upload files**, then **Commit changes**). The tablet picks up the update the next time the app is opened with internet (open it, close it, open it again). Your data is not affected.
+
+## Files
+
+```
+index.html             The app page
+manifest.webmanifest   Makes it installable (name, icon, colours)
+sw.js                  Keeps a copy of the app on the tablet for offline use
+css/styles.css         Design
+js/                    Screens (app, shift, history, analytics, settings, import)
+js/backend/            The app's built-in database and logic (runs on the tablet)
+icons/, img/           App icons and emblem
+vendor/pdfjs/          Mozilla's PDF reader (Apache-2.0 licence) for PDF guest lists
+```
