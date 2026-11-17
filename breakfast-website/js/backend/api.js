@@ -1,7 +1,7 @@
 // Everything the server used to do now runs inside the app, on the tablet.
 // The screens still call api('POST', '/api/...') exactly as before; this file answers those calls.
 import { data, settings, init, begin, exportAll, replaceAll } from './store.js';
-import { hashPassword, verifyPassword, tooManyAttempts } from './security.js';
+import { hashPassword, verifyPassword, tooManyAttempts, pinFingerprint, newSecret, isLocked, recordFailure } from './security.js';
 import { monthlyAnalytics, availableMonths, monthCsv, toCsv, isMonth } from './analytics.js';
 import { parseRoom } from '../rooms.js';
 
@@ -35,9 +35,75 @@ function cleanCode(value, field) {
   return s;
 }
 
-function publicUser(u) {
-  return { id: u.id, email: u.email, fullName: u.full_name, nickname: u.nickname, role: u.role, createdAt: u.created_at, avatarUrl: u.avatar || null };
+export const THEMES = ['hilton', 'darkroom', 'cocoa', 'tactical', 'idol', 'prog', 'brother', 'goat'];
+const themeOf = (u) => (THEMES.includes(u.theme) ? u.theme : 'hilton');
+function cleanTheme(value) {
+  if (!THEMES.includes(value)) throw new ApiError(400, 'Choose a theme from the list.');
+  return value;
 }
+
+function publicUser(u) {
+  return { id: u.id, fullName: u.full_name, nickname: u.nickname, role: u.role, createdAt: u.created_at, avatarUrl: u.avatar || null, hasPin: !!u.pin_hash, theme: themeOf(u), active: !u.disabled };
+}
+const activeUsers = () => rows('users').filter((u) => !u.disabled);
+
+// The breakfast team, added automatically once (the owner chose to keep these PINs in the app).
+// If a manager later removes someone, they are not added again.
+const TEAM = [
+  ['Duta', '1801', 'darkroom'], ['Nika', '1802', 'tactical'], ['Luka', '1803', 'cocoa'], ['Miro', '1804', 'prog'],
+  ['Dachi', '1805', 'idol'], ['Saba', '1806', 'brother'], ['Levani', '1807', 'goat'],
+];
+const TEAM_VERSION = 1;
+async function ensureTeam() {
+  if (data.users.size === 0 || Number(settings.get('teamSeeded') || 0) >= TEAM_VERSION) return;
+  const added = [];
+  for (const [name, pin, theme] of TEAM) {
+    if (rows('users').some((u) => u.nickname.toLowerCase() === name.toLowerCase())) continue;
+    const tx = begin();
+    try {
+      const fields = await pinFields(tx, pin);
+      tx.insert('users', { ...fields, full_name: name, nickname: name, role: 'employee', theme, avatar: null, created_at: now() });
+      audit(tx, null, 'account_created', null, { nickname: name, role: 'employee', theme, by: 'built-in team list' });
+      await tx.commit();
+      added.push(name);
+    } catch { /* PIN already used by someone else: skip this person */ }
+  }
+  const t = begin(); t.setting('teamSeeded', TEAM_VERSION); await t.commit();
+  return added;
+}
+
+// Every PIN must belong to one person, because logging in is "type your PIN".
+async function pinSecret() {
+  if (!settings.get('pinSecret')) { const t = begin(); t.setting('pinSecret', newSecret()); await t.commit(); }
+  return settings.get('pinSecret');
+}
+async function pinFields(tx, pin, exceptId = null) {
+  const tag = await pinFingerprint(pin, await pinSecret());
+  for (const u of activeUsers()) {
+    if (u.id === exceptId || !u.pin_hash) continue;
+    const same = u.pin_tag ? u.pin_tag === tag : await verifyPassword(pin, u.pin_hash);
+    if (same) throw new ApiError(409, 'Someone else already uses this PIN. Choose a different one.');
+  }
+  return { pin_hash: await hashPassword(pin), pin_tag: tag };
+}
+
+// A PIN is exactly 4 digits.
+function cleanPin(value, field = 'PIN') {
+  const pin = String(value ?? '').trim();
+  if (!/^\d{4}$/.test(pin)) throw new ApiError(400, `${field} must be exactly 4 digits.`);
+  return pin;
+}
+
+// Nicknames are shown on the login screen, so each must be different.
+function cleanNickname(value, fallbackFullName, exceptId = null) {
+  const nickname = value ? cleanText(value, 'Nickname', 1, 30) : fallbackFullName.split(' ')[0];
+  const taken = rows('users').find((u) => !u.disabled && u.id !== exceptId && u.nickname.toLowerCase() === nickname.toLowerCase());
+  if (taken) throw new ApiError(409, `Someone already uses the name “${nickname}”. Add a last initial, for example “${nickname} ${(fallbackFullName.split(' ')[1] || 'K')[0]}.”`);
+  return nickname;
+}
+
+const LOCK_CHOICES = [0, 5, 15, 30, 60];
+const lockMinutes = () => (settings.has('lockMinutes') ? Number(settings.get('lockMinutes')) : 30);
 
 function audit(tx, user, action, shiftId = null, details = null) {
   tx.insert('audit_log', { created_at: now(), user_id: user?.id ?? null, user_name: user?.nickname ?? null, action, shift_id: shiftId, details });
@@ -47,7 +113,8 @@ function currentUser() {
   let s = null;
   try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch { /* no session */ }
   if (!s || !s.userId || !s.expiresAt || new Date(s.expiresAt) < new Date()) return null;
-  return data.users.get(s.userId) || null;
+  const u = data.users.get(s.userId);
+  return u && !u.disabled ? u : null;
 }
 function startSession(user) {
   const expiresAt = new Date(Date.now() + SESSION_HOURS * 3600000).toISOString();
@@ -149,24 +216,20 @@ route('GET', '/api/setup-status', () => ({ needsSetup: data.users.size === 0 }))
 route('POST', '/api/setup', async ({ body }) => {
   if (data.users.size > 0) throw new ApiError(409, 'This tablet is already set up.');
   const fullName = cleanText(body.fullName, 'Full name', 2, 80);
-  const email = cleanText(body.email, 'Email', 3, 120).toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new ApiError(400, 'Please enter a valid email address.');
-  const password = String(body.password ?? '');
-  if (password.length < 8) throw new ApiError(400, 'Password must be at least 8 characters.');
-  const nickname = body.nickname ? cleanText(body.nickname, 'Nickname', 1, 30) : fullName.split(' ')[0];
-  const accessCode = cleanCode(body.accessCode, 'Employee access code');
+  const nickname = cleanNickname(body.nickname, fullName);
+  const pin = cleanPin(body.pin);
   const deleteCode = cleanCode(body.deleteCode, 'Delete code');
   const brandName = body.brandName ? cleanText(body.brandName, 'App name', 2, 40) : DEFAULT_BRAND.name;
   const tx = begin();
   const user = tx.insert('users', {
-    email, password_hash: await hashPassword(password), full_name: fullName, nickname, role: 'manager', avatar: null, created_at: now(),
+    ...(await pinFields(tx, pin)), full_name: fullName, nickname, role: 'manager', theme: 'hilton', avatar: null, created_at: now(),
   });
-  tx.setting('accessCode', accessCode);
   tx.setting('deleteCode', deleteCode);
   tx.setting('brandName', brandName);
   tx.setting('brandSubtitle', 'Breakfast Manager');
-  audit(tx, user, 'app_setup', null, { email });
+  audit(tx, user, 'app_setup', null, { nickname });
   await tx.commit();
+  await ensureTeam();
   startSession(user);
   return { user: publicUser(user) };
 });
@@ -177,6 +240,7 @@ route('GET', '/api/branding', () => ({
   name: settings.get('brandName') || DEFAULT_BRAND.name,
   subtitle: settings.get('brandSubtitle') ?? DEFAULT_BRAND.subtitle,
   logo: settings.get('logo') || 'img/emblem.svg',
+  lockMinutes: lockMinutes(),
 }));
 
 route('GET', '/api/settings', () => {
@@ -188,17 +252,23 @@ route('GET', '/api/settings', () => {
     accessCode: settings.get('accessCode') || '',
     deleteCode: settings.get('deleteCode') || '',
     lastBackupAt: settings.get('lastBackupAt') || null,
+    lockMinutes: lockMinutes(),
     timeZone: timeZone(),
   };
 });
 
 route('PUT', '/api/settings', async ({ body }) => {
   const manager = requireManager();
+  // Check everything first, so a mistake changes nothing.
+  const brandName = cleanText(body.brandName, 'App name', 2, 40);
+  const deleteCode = cleanCode(body.deleteCode, 'Delete code');
+  const lock = body.lockMinutes === undefined ? undefined : Number(body.lockMinutes);
+  if (lock !== undefined && !LOCK_CHOICES.includes(lock)) throw new ApiError(400, 'Choose when the app locks itself.');
   const tx = begin();
-  tx.setting('brandName', cleanText(body.brandName, 'App name', 2, 40));
+  tx.setting('brandName', brandName);
   tx.setting('brandSubtitle', String(body.brandSubtitle ?? '').trim().slice(0, 40));
-  tx.setting('accessCode', cleanCode(body.accessCode, 'Employee access code'));
-  tx.setting('deleteCode', cleanCode(body.deleteCode, 'Delete code'));
+  tx.setting('deleteCode', deleteCode);
+  if (lock !== undefined) tx.setting('lockMinutes', lock);
   audit(tx, manager, 'settings_changed');
   await tx.commit();
   return { ok: true };
@@ -243,42 +313,83 @@ route('POST', '/api/restore', async ({ body }) => {
 
 // ----- accounts -----
 
-route('POST', '/api/auth/register', async ({ body }) => {
-  if (tooManyAttempts('register', 20)) throw new ApiError(429, 'Too many attempts. Try again later.');
-  if (String(body.accessCode ?? '').trim() !== String(settings.get('accessCode') || '')) {
-    throw new ApiError(403, 'The employee access code is incorrect. Ask your manager for it.');
-  }
-  const fullName = cleanText(body.fullName, 'Full name', 2, 80);
-  const email = cleanText(body.email, 'Email', 3, 120).toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new ApiError(400, 'Please enter a valid email address.');
-  const password = String(body.password ?? '');
-  if (password.length < 8) throw new ApiError(400, 'Password must be at least 8 characters.');
-  if (password.length > 200) throw new ApiError(400, 'Password is too long.');
-  const nickname = body.nickname ? cleanText(body.nickname, 'Nickname', 1, 30) : fullName.split(' ')[0];
-  if (rows('users').some((u) => u.email === email)) throw new ApiError(409, 'An account with this email already exists. Try logging in.');
+// Everyone who can log in on this tablet, for the "Who's working?" screen.
+route('GET', '/api/profiles', async () => { await ensureTeam(); return {
+  profiles: activeUsers().sort((a, b) => a.nickname.localeCompare(b.nickname))
+    .map((u) => ({ id: u.id, nickname: u.nickname, fullName: u.full_name, avatarUrl: u.avatar || null, role: u.role, hasPin: !!u.pin_hash, theme: themeOf(u) })),
+}; });
+
+// Staff accounts are created by a manager (Settings → Team). There is no self-signup.
+route('POST', '/api/auth/register', () => { throw new ApiError(410, 'Ask a manager to add you in Settings → Team.'); });
+
+// Log in by typing your PIN: the PIN tells us who you are.
+route('POST', '/api/auth/pin', async ({ body }) => {
+  if (isLocked('pin-login', 5, 60 * 1000)) throw new ApiError(429, 'Too many wrong PINs. Wait one minute and try again.');
+  const pin = String(body.pin ?? '').trim();
+  if (!/^\d{4}$/.test(pin)) throw new ApiError(400, 'Enter your 4-digit PIN.');
   const tx = begin();
-  const user = tx.insert('users', {
-    email, password_hash: await hashPassword(password), full_name: fullName, nickname,
-    role: data.users.size === 0 ? 'manager' : 'employee', avatar: null, created_at: now(),
-  });
-  audit(tx, user, 'account_created', null, { email, role: user.role });
+  const tag = await pinFingerprint(pin, await pinSecret());
+  let user = activeUsers().find((u) => u.pin_tag && u.pin_tag === tag) || null;
+  if (user && !(await verifyPassword(pin, user.pin_hash))) user = null;
+  if (!user) {
+    // Accounts from before PIN fingerprints: check them one by one and remember the fingerprint.
+    for (const u of activeUsers().filter((x) => x.pin_hash && !x.pin_tag)) {
+      if (await verifyPassword(pin, u.pin_hash)) { user = u; tx.update('users', { ...u, pin_tag: tag }); break; }
+    }
+  }
+  if (!user) { recordFailure('pin-login', 5, 60 * 1000); throw new ApiError(401, 'Wrong PIN. Try again.'); }
+  audit(tx, user, 'logged_in');
   await tx.commit();
   startSession(user);
-  return { user: publicUser(user) };
+  return { user: publicUser(data.users.get(user.id)) };
 });
 
+// Log in by tapping your name and entering your PIN.
+// Accounts made before PINs existed log in once with their password and then choose a PIN.
 route('POST', '/api/auth/login', async ({ body }) => {
-  const email = String(body.email ?? '').trim().toLowerCase();
-  if (tooManyAttempts('login:' + email)) throw new ApiError(429, 'Too many login attempts. Please wait a few minutes.');
-  const user = rows('users').find((u) => u.email === email);
-  if (!user || !(await verifyPassword(String(body.password ?? ''), user.password_hash))) {
-    throw new ApiError(401, 'Incorrect email or password.');
-  }
+  const user = data.users.get(Number(body.userId));
+  if (!user || user.disabled) throw new ApiError(404, 'This account no longer exists.');
+  if (tooManyAttempts('login:' + user.id, 5, 2 * 60 * 1000)) throw new ApiError(429, 'Too many wrong tries. Wait 2 minutes, or ask a manager to reset your PIN.');
+  let ok = false;
+  if (user.pin_hash) ok = await verifyPassword(String(body.pin ?? ''), user.pin_hash);
+  else if (user.password_hash) ok = await verifyPassword(String(body.password ?? ''), user.password_hash);
+  if (!ok) throw new ApiError(401, user.pin_hash ? 'Wrong PIN. Try again.' : 'Wrong password. Try again.');
   const tx = begin();
   audit(tx, user, 'logged_in');
   await tx.commit();
   startSession(user);
-  return { user: publicUser(user) };
+  return { user: publicUser(user), needsPin: !user.pin_hash };
+});
+
+// Choose or change your own PIN.
+route('PUT', '/api/me/pin', async ({ body }) => {
+  const user = requireUser();
+  if (user.pin_hash && !(await verifyPassword(String(body.currentPin ?? ''), user.pin_hash))) {
+    throw new ApiError(403, 'Your current PIN is not right.');
+  }
+  const pin = cleanPin(body.pin, 'New PIN');
+  const tx = begin();
+  const { password_hash, email, ...rest } = user;
+  tx.update('users', { ...rest, ...(await pinFields(tx, pin, user.id)) });
+  audit(tx, user, user.pin_hash ? 'pin_changed' : 'pin_created');
+  await tx.commit();
+  void password_hash; void email;
+  return { user: publicUser(data.users.get(user.id)) };
+});
+
+// Managers can give an employee a new PIN when they forget it.
+route('PUT', '/api/users/:id/pin', async ({ body, params }) => {
+  const manager = requireManager();
+  const target = data.users.get(Number(params.id));
+  if (!target) throw new ApiError(404, 'Employee not found.');
+  const pin = cleanPin(body.pin, 'New PIN');
+  const tx = begin();
+  const { password_hash, email, ...rest } = target;
+  tx.update('users', { ...rest, ...(await pinFields(tx, pin, target.id)) });
+  audit(tx, manager, 'pin_reset', null, { userId: target.id, nickname: target.nickname });
+  await tx.commit();
+  void password_hash; void email;
+  return { ok: true };
 });
 
 route('POST', '/api/auth/logout', () => { endSession(); return { ok: true }; });
@@ -291,7 +402,7 @@ route('GET', '/api/me', () => {
 
 route('PUT', '/api/me/nickname', async ({ body }) => {
   const user = requireUser();
-  const nickname = cleanText(body.nickname, 'Nickname', 1, 30);
+  const nickname = cleanNickname(cleanText(body.nickname, 'Nickname', 1, 30), user.full_name, user.id);
   const tx = begin();
   tx.update('users', { ...user, nickname });
   audit(tx, user, 'nickname_changed', null, { from: user.nickname, to: nickname });
@@ -320,7 +431,59 @@ route('DELETE', '/api/me/avatar', async () => {
 
 route('GET', '/api/users', () => {
   requireManager();
-  return { users: rows('users').sort((a, b) => a.created_at.localeCompare(b.created_at)).map(publicUser) };
+  return { users: activeUsers().sort((a, b) => a.created_at.localeCompare(b.created_at)).map(publicUser) };
+});
+
+// Managers add staff: name, PIN, role and personal theme.
+route('POST', '/api/users', async ({ body }) => {
+  const manager = requireManager();
+  const fullName = cleanText(body.fullName, 'Name', 1, 80);
+  const nickname = cleanNickname(body.nickname, fullName);
+  const pin = cleanPin(body.pin);
+  const role = body.role === 'manager' ? 'manager' : 'employee';
+  const theme = cleanTheme(body.theme || 'hilton');
+  const tx = begin();
+  const user = tx.insert('users', { ...(await pinFields(tx, pin)), full_name: fullName, nickname, role, theme, avatar: null, created_at: now() });
+  audit(tx, manager, 'account_created', null, { nickname, role, theme });
+  await tx.commit();
+  return { user: publicUser(user) };
+});
+
+route('PUT', '/api/users/:id/theme', async ({ body, params }) => {
+  const manager = requireManager();
+  const target = data.users.get(Number(params.id));
+  if (!target || target.disabled) throw new ApiError(404, 'Employee not found.');
+  const theme = cleanTheme(body.theme);
+  const tx = begin();
+  tx.update('users', { ...target, theme });
+  audit(tx, manager, 'theme_changed', null, { userId: target.id, nickname: target.nickname, theme });
+  await tx.commit();
+  return { user: publicUser(data.users.get(target.id)) };
+});
+
+route('PUT', '/api/me/theme', async ({ body }) => {
+  const user = requireUser();
+  const theme = cleanTheme(body.theme);
+  const tx = begin();
+  tx.update('users', { ...user, theme });
+  await tx.commit();
+  return { user: publicUser(data.users.get(user.id)) };
+});
+
+// Removing someone keeps their name on old shifts; they just can't log in any more.
+route('DELETE', '/api/users/:id', async ({ params }) => {
+  const manager = requireManager();
+  const target = data.users.get(Number(params.id));
+  if (!target || target.disabled) throw new ApiError(404, 'Employee not found.');
+  if (target.id === manager.id) throw new ApiError(409, 'You can’t remove your own account.');
+  if (target.role === 'manager' && activeUsers().filter((u) => u.role === 'manager').length <= 1) throw new ApiError(409, 'There must always be at least one manager.');
+  const tx = begin();
+  const { pin_hash, pin_tag, password_hash, ...rest } = target;
+  tx.update('users', { ...rest, disabled: true, removed_at: now() });
+  audit(tx, manager, 'account_removed', null, { userId: target.id, nickname: target.nickname });
+  await tx.commit();
+  void pin_hash; void pin_tag; void password_hash;
+  return { ok: true };
 });
 
 route('PUT', '/api/users/:id/role', async ({ body, params }) => {
@@ -328,12 +491,12 @@ route('PUT', '/api/users/:id/role', async ({ body, params }) => {
   if (!['employee', 'manager'].includes(body.role)) throw new ApiError(400, 'Unknown role.');
   const target = data.users.get(Number(params.id));
   if (!target) throw new ApiError(404, 'Employee not found.');
-  if (target.role === 'manager' && body.role === 'employee' && rows('users').filter((u) => u.role === 'manager').length <= 1) {
+  if (target.role === 'manager' && body.role === 'employee' && activeUsers().filter((u) => u.role === 'manager').length <= 1) {
     throw new ApiError(409, 'There must always be at least one manager.');
   }
   const tx = begin();
   tx.update('users', { ...target, role: body.role });
-  audit(tx, manager, 'role_changed', null, { userId: target.id, email: target.email, from: target.role, to: body.role });
+  audit(tx, manager, 'role_changed', null, { userId: target.id, nickname: target.nickname, from: target.role, to: body.role });
   await tx.commit();
   return { ok: true };
 });

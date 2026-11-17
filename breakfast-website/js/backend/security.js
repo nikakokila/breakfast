@@ -34,3 +34,18 @@ export function tooManyAttempts(key, limit = 10, windowMs = 10 * 60 * 1000) {
   attempts.set(key, list);
   return list.length > limit;
 }
+
+// Fast, private PIN fingerprint so "type your PIN" can find the right person without trying every account.
+// It is an HMAC with a random secret kept on this tablet, so the fingerprint alone does not reveal the PIN.
+export async function pinFingerprint(pin, secretHex) {
+  const key = await crypto.subtle.importKey('raw', fromHex(secretHex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return toHex(await crypto.subtle.sign('HMAC', key, enc.encode(String(pin))));
+}
+export const newSecret = () => toHex(crypto.getRandomValues(new Uint8Array(32)));
+
+// Checks the limit without counting this try (used so only wrong PINs count).
+export function isLocked(key, limit = 10, windowMs = 10 * 60 * 1000) {
+  const now = Date.now();
+  return (attempts.get(key) || []).filter((t) => now - t < windowMs).length >= limit;
+}
+export const recordFailure = (key, limit, windowMs) => tooManyAttempts(key, limit, windowMs);
