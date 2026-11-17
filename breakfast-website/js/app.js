@@ -437,7 +437,7 @@ function renderSetup() {
         <div class="auth-card">
           <div class="auth-mobile-brand brand-lockup">${brandLockup()}</div>
           <h2>Set up this tablet</h2>
-          <p class="lede">This first account becomes the manager. Employees create their own accounts later with the access code.</p>
+          <p class="lede">This first account is the manager. The rest of the team is added for you automatically.</p>
           <div id="setup-error"></div>
           <form id="setup-form" novalidate autocomplete="off">
             <div class="name-row">
