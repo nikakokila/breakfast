@@ -113,21 +113,49 @@ export function toast(message, type = 'info') {
 
 // ---------- Modals ----------
 // openModal(htmlContent, onMount) -> close()
+// The Android back button should close an open pop-up rather than leave the screen.
+// Each pop-up adds one step to the browser history; closing it with a button removes that step again.
+let pendingBack = null;
+export const afterHistorySettles = () => pendingBack || Promise.resolve();
+function waitForPop() {
+  return new Promise((resolve) => {
+    const done = () => { window.removeEventListener('popstate', done); clearTimeout(t); pendingBack = null; resolve(); };
+    const t = setTimeout(done, 400);
+    window.addEventListener('popstate', done);
+  });
+}
+
 export function openModal(content, onMount) {
   const root = document.getElementById('modal-root');
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${content}</div>`;
   const previousFocus = document.activeElement;
+  let armed = false;
+  let closedByBack = false;
+  const onPop = () => { closedByBack = true; close(); };
   const close = () => {
+    window.removeEventListener('popstate', onPop);
     document.removeEventListener('keydown', onKey);
+    if (!backdrop.isConnected) return;
     backdrop.remove();
     previousFocus?.focus?.();
+    if (armed && !closedByBack && history.state?.bmModal) {
+      pendingBack = waitForPop();
+      history.back();
+    }
   };
   const onKey = (e) => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
   backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) close(); });
   root.appendChild(backdrop);
+  const arm = () => {
+    if (!backdrop.isConnected) return;
+    history.pushState({ bmModal: Date.now() }, '');
+    window.addEventListener('popstate', onPop);
+    armed = true;
+  };
+  if (pendingBack) pendingBack.then(arm); else arm();
   const modal = backdrop.querySelector('.modal');
   onMount?.(modal, close);
   (modal.querySelector('[autofocus]') || modal.querySelector('button.btn-primary, button.btn-gold, button.btn-danger'))?.focus();

@@ -2,7 +2,12 @@
 import { api, html, raw, esc, icons, toast, openModal, confirmDialog, fmtTime, rankBadge, setBusy, normalize } from './lib.js';
 import { parseRoom } from './rooms.js';
 import { readGuestFile, extractGuests, templateTxt } from './guest-import.js';
-import { state, view, go, refreshMe } from './app.js';
+import { state, view, go, refreshMe, buzz } from './app.js';
+import { celebrate } from './celebrate.js';
+import { play } from './sounds.js';
+import { currentTheme } from './themes.js';
+
+const CHECK_SVG = raw('<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>');
 
 const RANKS = ['DIAMOND', 'GOLD', 'MEMBER'];
 
@@ -458,11 +463,15 @@ export async function renderActiveShift() {
       <div>
         <div class="search-box">
           ${icons.search}
-          <input class="search-input" id="search" placeholder="Room number or guest name" autocomplete="off" spellcheck="false" aria-label="Search by room number or guest name">
+          <input class="search-input" id="search" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" aria-label="Search by room number or guest name">
           <button class="btn btn-ghost search-clear hidden" id="clear-search">Clear</button>
+          <div class="search-mode" role="group" aria-label="Keyboard">
+            <button type="button" data-mode="room" title="Number keyboard for room numbers">123</button>
+            <button type="button" data-mode="name" title="Letter keyboard for names">ABC</button>
+          </div>
         </div>
         <div class="search-help">
-          <span>Type a room like <b>1208</b> or a name. <span class="kbd">Enter</span> checks in a single match · <span class="kbd">Esc</span> clears</span>
+          <span>Type a room like <b>1208</b>, or tap <b>ABC</b> to search by name. <span class="kbd">Enter</span> checks in a single match</span>
           <div class="filters" id="filters"></div>
         </div>
         <div class="results" id="results"></div>
@@ -482,6 +491,32 @@ export async function renderActiveShift() {
   `);
 
   const searchIn = el.querySelector('#search');
+
+  // 123 = number keyboard for rooms (default), ABC = letters for names. Remembered on this tablet.
+  let mode = 'room';
+  try { mode = localStorage.getItem('bm-search-mode') || 'room'; } catch { /* ignore */ }
+  function setMode(m, focus = true) {
+    mode = m;
+    try { localStorage.setItem('bm-search-mode', m); } catch { /* ignore */ }
+    searchIn.setAttribute('inputmode', m === 'room' ? 'numeric' : 'text');
+    searchIn.placeholder = m === 'room' ? 'Room number' : 'Guest name';
+    el.querySelectorAll('.search-mode [data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
+    if (focus) { searchIn.blur(); setTimeout(() => searchIn.focus(), 30); }
+  }
+  setMode(mode, false);
+  el.querySelector('.search-mode').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mode]');
+    if (b) setMode(b.dataset.mode);
+  });
+
+  // Keep the screen on during breakfast service (Android/Chrome).
+  let wakeLock = null;
+  const keepAwake = async () => {
+    try { if (document.visibilityState === 'visible' && 'wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch { /* not allowed */ }
+  };
+  const onVisible = () => { if (document.visibilityState === 'visible') keepAwake(); };
+  keepAwake();
+  document.addEventListener('visibilitychange', onVisible);
 
   // ---------- drawing ----------
   function drawMeta() {
@@ -532,7 +567,7 @@ export async function renderActiveShift() {
     return html`
       <div class="guest ${g.arrival ? 'arrived' : ''} ${flashId === g.id ? 'flash' : ''}" data-guest="${g.id}">
         <div class="room-block"><b>${g.room}</b><span>Floor ${g.floor}</span></div>
-        <div style="min-width:0">
+        <div class="guest-main">
           <div class="guest-name">${g.fullName}</div>
           <div class="guest-meta">
             ${rankBadge(g.rank)}
@@ -541,9 +576,9 @@ export async function renderActiveShift() {
         </div>
         <div class="guest-side">
           ${g.arrival ? html`
-            <div class="arrived-box"><b>Already arrived</b><span>${fmtTime(g.arrival.arrivedAt)} · by ${g.arrival.checkedInName}</span></div>
-            <button class="link-btn small" data-undo="${g.arrival.id}" data-name="${g.fullName}" data-room="${g.room}">Undo check-in</button>` : html`
-            <button class="btn btn-gold btn-checkin" data-checkin="${g.id}">Check in</button>`}
+            <div class="arrived-box">${CHECK_SVG}<b>Arrived</b><span>${fmtTime(g.arrival.arrivedAt)} · ${g.arrival.checkedInName}</span>
+              <button class="link-btn small" data-undo="${g.arrival.id}" data-name="${g.fullName}" data-room="${g.room}">Undo</button></div>` : html`
+            <button class="checkin-box" data-checkin="${g.id}">${CHECK_SVG}<span>Check in</span></button>`}
         </div>
       </div>`;
   }
@@ -616,9 +651,11 @@ export async function renderActiveShift() {
 
   // ---------- actions ----------
   function showAlreadyArrived(name, room, arrivedAt, by) {
+    buzz([80, 60, 80]);
+    play(currentTheme(), 'warn');
     openModal(String(html`
-      <div class="modal-head"><span class="badge UNKNOWN" style="background:var(--success-soft);color:var(--success);border-color:#bfe3cf">Duplicate prevented</span>
-        <h2 style="margin-top:10px">ALREADY ARRIVED</h2>
+      <div class="modal-head dup-alert"><span class="dup-tag">Duplicate prevented</span>
+        <h2 style="margin-top:10px">Already arrived</h2>
         <p><b>${name}</b> (room ${room}) was already checked in at <b>${fmtTime(arrivedAt)}</b> by ${by}.</p></div>
       <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>`),
       (m, close) => { m.querySelector('[data-close]').onclick = close; });
@@ -631,6 +668,8 @@ export async function renderActiveShift() {
     try {
       data = await api('POST', `/api/shifts/${shiftId}/checkin`, { guestId });
       const ng = data.guests.find((x) => x.id === guestId);
+      buzz(35);
+      celebrate({ name: ng.fullName, room: ng.room, rank: ng.rank });
       toast(`${ng.fullName} (${ng.room}) checked in at ${fmtTime(ng.arrival.arrivedAt)}.`, 'success');
       flashId = guestId;
       query = '';
@@ -652,6 +691,8 @@ export async function renderActiveShift() {
   async function registerUnknown(room, name) {
     try {
       data = await api('POST', `/api/shifts/${shiftId}/unknown`, { room, name });
+      buzz(35);
+      celebrate({ name: name || 'Unknown guest', room, rank: 'UNKNOWN' });
       toast(`Unknown arrival registered${room ? ` for room ${room}` : ''}.`, 'success');
       query = '';
       searchIn.value = '';
@@ -722,6 +763,7 @@ export async function renderActiveShift() {
           data = res;
           if (alsoCheckIn) data = await api('POST', `/api/shifts/${shiftId}/checkin`, { guestId: res.addedGuestId });
           close();
+          if (alsoCheckIn) celebrate({ name: `${first} ${last}`, room: r.room, rank: f.rank });
           toast(alsoCheckIn ? `${first} ${last} (${r.room}) added and checked in.` : `${first} ${last} (${r.room}) added to today’s list.`, 'success');
           flashId = res.addedGuestId;
           query = ''; searchIn.value = '';
@@ -829,6 +871,8 @@ export async function renderActiveShift() {
   searchIn.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { query = ''; searchIn.value = ''; drawFilters(); drawResults(); }
     if (e.key === 'Enter') {
+      // Stop the same Enter press from also pressing the OK button of the pop-up it opens.
+      e.preventDefault();
       const list = matches();
       if (query.trim() && list.length === 1) checkIn(list[0].id, el.querySelector(`[data-checkin="${list[0].id}"]`));
       else if (query.trim() && list.length === 0) el.querySelector('#unknown-inline button')?.focus();
@@ -873,7 +917,12 @@ export async function renderActiveShift() {
 
   drawAll();
   searchIn.focus();
-  return () => { document.removeEventListener('keydown', onKey); window.removeEventListener('live', onLive); };
+  return () => {
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('live', onLive);
+    document.removeEventListener('visibilitychange', onVisible);
+    wakeLock?.release?.().catch(() => {});
+  };
 }
 
 void raw; void esc;

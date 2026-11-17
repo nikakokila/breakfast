@@ -1,6 +1,8 @@
 // SETTINGS — profile picture, nickname, account info, log out, and team roles for managers.
-import { api, html, avatar, toast, confirmDialog, fmtDay, setBusy } from './lib.js';
-import { state, view, go, renderShell, refreshBrand, downloadBackup, restoreFromFile } from './app.js';
+import { api, html, avatar, toast, confirmDialog, fmtDay, setBusy, openModal } from './lib.js';
+import { state, view, go, renderShell, refreshBrand, downloadBackup, restoreFromFile, lockApp } from './app.js';
+import { THEMES, themeIds, applyTheme, welcome } from './themes.js';
+import { play, isMuted, setMuted } from './sounds.js';
 
 // Resize the chosen photo in the browser to a 320×320 square before uploading.
 async function toSquareImage(file) {
@@ -58,11 +60,25 @@ export async function renderSettings() {
 
         <div style="display:grid;gap:22px">
           <div class="card">
-            <div class="card-head"><h2>Nickname</h2></div>
+            <div class="card-head"><h2>Name on the login screen</h2></div>
             <form class="card-pad inline-form" id="nick-form">
               <div class="field"><input class="input" name="nickname" value="${me.nickname}" maxlength="30" required aria-label="Nickname">
-                <span class="hint">Shown in the top bar and next to the actions you perform.</span></div>
-              <button class="btn btn-primary" type="submit">Save nickname</button>
+                <span class="hint">Shown on the login screen, in the top bar and next to the actions you perform.</span></div>
+              <button class="btn btn-primary" type="submit">Save name</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>${me.hasPin ? 'Change your PIN' : 'Choose a PIN'}</h2></div>
+            <form class="card-pad" id="pin-form" autocomplete="off">
+              <div id="pin-error"></div>
+              <div class="pin-row">
+                ${me.hasPin ? html`<div class="field"><label for="p-cur">Current PIN</label><input class="input pin-input" id="p-cur" type="password" inputmode="numeric" maxlength="4"></div>` : ''}
+                <div class="field"><label for="p-new">New PIN</label><input class="input pin-input" id="p-new" type="password" inputmode="numeric" maxlength="4"></div>
+                <div class="field"><label for="p-new2">Repeat new PIN</label><input class="input pin-input" id="p-new2" type="password" inputmode="numeric" maxlength="4"></div>
+              </div>
+              <button class="btn btn-primary" type="submit">Save PIN</button>
+              <p class="muted small" style="margin-top:10px">Forgot your PIN? A manager can give you a new one in Settings → Team.</p>
             </form>
           </div>
 
@@ -70,32 +86,48 @@ export async function renderSettings() {
             <div class="card-head"><h2>Account information</h2></div>
             <dl class="info-list">
               <dt>Full name</dt><dd>${me.fullName}</dd>
-              <dt>Email</dt><dd>${me.email}</dd>
               <dt>Role</dt><dd class="role-pill">${me.role}</dd>
               <dt>Member since</dt><dd>${fmtDay(me.createdAt)}</dd>
               <dt>Employee ID</dt><dd>#${String(me.id).padStart(4, '0')}</dd>
             </dl>
             <div class="card-pad" style="display:flex;justify-content:flex-end">
-              <button class="btn btn-danger-outline" id="logout">Log out</button>
+              <button class="btn btn-danger-outline" id="logout">Lock / log out</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Your look and sound</h2><span class="muted small">${THEMES[me.theme]?.label || 'Hilton heritage'}</span></div>
+            <div class="card-pad">
+              <div class="theme-grid">${themeIds.map((t) => html`
+                <button type="button" class="theme-chip t-${t} ${me.theme === t ? 'on' : ''}" data-my-theme="${t}">
+                  <span class="swatch"></span><b>${THEMES[t].label}</b><small>${THEMES[t].note}</small>
+                </button>`)}</div>
+              <div class="theme-actions">
+                <button type="button" class="btn btn-outline btn-sm" id="preview-sound">Play my sounds</button>
+                <label class="check-row" style="margin:0"><input type="checkbox" id="mute-box" ${isMuted() ? 'checked' : ''}> Mute all sounds on this tablet</label>
+              </div>
             </div>
           </div>
 
           ${isManager() ? html`
             <div class="card">
-              <div class="card-head"><h2>Team</h2><span class="muted small">${team.length} accounts</span></div>
+              <div class="card-head"><h2>Team</h2><div class="head-actions"><span class="muted small">${team.length} people</span><button class="btn btn-gold btn-sm" type="button" id="add-staff">+ Add employee</button></div></div>
               <div class="table-wrap"><table class="stack">
-                <thead><tr><th>Employee</th><th>Email</th><th>Joined</th><th>Role</th></tr></thead>
+                <thead><tr><th>Employee</th><th>Theme</th><th>Role</th><th></th></tr></thead>
                 <tbody>${team.map((u) => html`<tr>
                   <td class="td-name"><div style="display:flex;align-items:center;gap:10px">${avatar(u)}<div><b>${u.nickname}</b><div class="muted small">${u.fullName}</div></div></div></td>
-                  <td data-label="Email">${u.email}</td>
-                  <td class="muted small" data-label="Joined">${fmtDay(u.createdAt)}</td>
+                  <td data-label="Theme"><select class="select" style="height:36px;width:auto" data-theme-of="${u.id}">
+                    ${themeIds.map((t) => html`<option value="${t}" ${u.theme === t ? 'selected' : ''}>${THEMES[t].label}</option>`)}
+                  </select></td>
                   <td data-label="Role"><select class="select" style="height:36px;width:auto" data-role="${u.id}">
                     <option value="employee" ${u.role === 'employee' ? 'selected' : ''}>Employee</option>
                     <option value="manager" ${u.role === 'manager' ? 'selected' : ''}>Manager</option>
                   </select></td>
+                  <td class="actions"><button class="btn btn-ghost btn-sm" type="button" data-reset-pin="${u.id}" data-name="${u.nickname}">${u.hasPin ? 'Reset PIN' : 'Set PIN'}</button>
+                    ${u.id !== me.id ? html`<button class="btn btn-ghost btn-sm danger-text" type="button" data-remove="${u.id}" data-name="${u.nickname}">Remove</button>` : ''}</td>
                 </tr>`)}</tbody>
               </table></div>
-              <p class="card-pad muted small">Managers can correct completed shifts (every correction is logged). New employees sign up with the employee access code below.</p>
+              <p class="card-pad muted small">Only managers can add or remove people. Everyone logs in by typing their own PIN, so every PIN must be different. Removed people stay on old shift records.</p>
             </div>
 
             <div class="card">
@@ -117,10 +149,12 @@ export async function renderSettings() {
                   <div class="field"><label for="a-name">App name</label><input class="input" id="a-name" name="brandName" maxlength="40" value="${app.brandName}"></div>
                   <div class="field"><label for="a-sub">Small line under the name</label><input class="input" id="a-sub" name="brandSubtitle" maxlength="40" value="${app.brandSubtitle}"></div>
                 </div>
-                <div class="name-row">
-                  <div class="field"><label for="a-access">Employee access code</label><input class="input" id="a-access" name="accessCode" value="${app.accessCode}"><span class="hint">Needed to create an account.</span></div>
-                  <div class="field"><label for="a-delete">Delete code</label><input class="input" id="a-delete" name="deleteCode" value="${app.deleteCode}"><span class="hint">Needed to delete a shift.</span></div>
-                </div>
+                <div class="field"><label for="a-delete">Delete code</label><input class="input" id="a-delete" name="deleteCode" value="${app.deleteCode}"><span class="hint">Needed to delete a shift.</span></div>
+                <div class="field"><label for="a-lock">Lock automatically</label>
+                  <select class="select" id="a-lock" name="lockMinutes">
+                    ${[[5, 'After 5 minutes without use'], [15, 'After 15 minutes without use'], [30, 'After 30 minutes without use'], [60, 'After 1 hour without use'], [0, 'Never']].map(([v, l]) => html`<option value="${v}" ${app.lockMinutes === v ? 'selected' : ''}>${l}</option>`)}
+                  </select>
+                  <span class="hint">The app goes back to “Who’s working?”, so each check-in is recorded under the right person.</span></div>
                 <button class="btn btn-primary" type="submit">Save app settings</button>
               </form>
             </div>
@@ -172,12 +206,42 @@ export async function renderSettings() {
     });
 
     el.querySelector('#logout').addEventListener('click', async () => {
-      const ok = await confirmDialog({ title: 'Log out?', text: 'You’ll need your email and password to log back in.', confirmText: 'Log out', variant: 'danger' });
-      if (!ok) return;
-      await api('POST', '/api/auth/logout');
-      state.me = null;
-      go('/login');
+      lockApp();
     });
+
+    // ----- PIN -----
+    el.querySelector('#pin-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const err = el.querySelector('#pin-error');
+      const pin = f.querySelector('#p-new').value;
+      if (pin !== f.querySelector('#p-new2').value) { err.innerHTML = String(html`<div class="form-error">The two new PINs are different.</div>`); return; }
+      try {
+        const { user } = await api('PUT', '/api/me/pin', { currentPin: f.querySelector('#p-cur')?.value, pin });
+        state.me = user;
+        toast('PIN saved.', 'success');
+        refreshPage();
+      } catch (x) { err.innerHTML = String(html`<div class="form-error">${x.message}</div>`); }
+    });
+    el.querySelectorAll('[data-reset-pin]').forEach((b) => b.addEventListener('click', () => {
+      openModal(String(html`
+        <div class="modal-head"><h2>New PIN for ${b.dataset.name}</h2><p>Give them this PIN. They can change it later in their own Settings.</p></div>
+        <form autocomplete="off"><div class="modal-body"><div id="rp-error"></div>
+          <div class="field"><label for="rp-pin">New 4-digit PIN</label><input class="input pin-input" id="rp-pin" type="password" inputmode="numeric" maxlength="4" autofocus></div></div>
+          <div class="modal-foot"><button type="button" class="btn btn-outline" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save PIN</button></div>
+        </form>`), (m, close) => {
+        m.querySelector('[data-close]').onclick = close;
+        m.querySelector('form').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          try {
+            await api('PUT', `/api/users/${b.dataset.resetPin}/pin`, { pin: m.querySelector('#rp-pin').value });
+            close();
+            toast(`New PIN saved for ${b.dataset.name}.`, 'success');
+            refreshPage();
+          } catch (x) { m.querySelector('#rp-error').innerHTML = String(html`<div class="form-error">${x.message}</div>`); }
+        });
+      });
+    }));
 
     // ----- manager: app settings, logo, backup -----
     el.querySelector('#app-form')?.addEventListener('submit', async (e) => {
@@ -222,6 +286,71 @@ export async function renderSettings() {
         variant: 'danger',
       });
       if (ok) restoreFromFile(file);
+    });
+
+    // ----- look and sound -----
+    el.querySelectorAll('[data-my-theme]').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        const { user } = await api('PUT', '/api/me/theme', { theme: b.dataset.myTheme });
+        state.me = user;
+        await welcome(user);
+        refreshPage();
+      } catch (err) { toast(err.message, 'error'); }
+    }));
+    el.querySelector('#preview-sound')?.addEventListener('click', () => {
+      play(me.theme, 'login');
+      setTimeout(() => play(me.theme, 'checkin'), 1800);
+      setTimeout(() => play(me.theme, 'warn'), 2800);
+    });
+    el.querySelector('#mute-box')?.addEventListener('change', (e) => { setMuted(e.target.checked); renderShell('settings'); draw(); });
+
+    // ----- manager: team -----
+    el.querySelectorAll('[data-theme-of]').forEach((sel) => sel.addEventListener('change', async () => {
+      try {
+        await api('PUT', `/api/users/${sel.dataset.themeOf}/theme`, { theme: sel.value });
+        toast(`Theme set to ${THEMES[sel.value].label}.`, 'success');
+        if (Number(sel.dataset.themeOf) === me.id) { state.me.theme = sel.value; applyTheme(sel.value); refreshPage(); }
+      } catch (err) { toast(err.message, 'error'); refreshPage(); }
+    }));
+    el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: `Remove ${b.dataset.name}?`,
+        text: 'They will no longer be able to log in. Their name stays on the shifts they already worked.',
+        confirmText: 'Remove', variant: 'danger',
+      });
+      if (!ok) return;
+      try { await api('DELETE', `/api/users/${b.dataset.remove}`); toast(`${b.dataset.name} removed.`, 'success'); refreshPage(); }
+      catch (err) { toast(err.message, 'error'); }
+    }));
+    el.querySelector('#add-staff')?.addEventListener('click', () => {
+      openModal(String(html`
+        <div class="modal-head"><h2>Add employee</h2><p>They will log in by typing this PIN, so it must be different from everyone else’s.</p></div>
+        <form autocomplete="off" id="staff-form"><div class="modal-body"><div id="sf-error"></div>
+          <div class="field"><label for="sf-name">Name</label><input class="input" id="sf-name" name="fullName" maxlength="80" required autofocus placeholder="e.g. Luka"></div>
+          <div class="name-row">
+            <div class="field"><label for="sf-pin">4-digit PIN</label><input class="input pin-input" id="sf-pin" name="pin" type="password" inputmode="numeric" maxlength="4" required></div>
+            <div class="field"><label for="sf-role">Role</label><select class="select" id="sf-role" name="role"><option value="employee">Employee</option><option value="manager">Manager</option></select></div>
+          </div>
+          <div class="field"><label>Theme</label><div class="theme-grid small">${themeIds.map((t, i) => html`
+            <label class="theme-chip t-${t}"><input type="radio" name="theme" value="${t}" ${i === 0 ? 'checked' : ''} class="sr-only"><span class="swatch"></span><b>${THEMES[t].label}</b></label>`)}</div></div>
+        </div>
+        <div class="modal-foot"><button type="button" class="btn btn-outline" data-close>Cancel</button><button class="btn btn-gold" type="submit">Add employee</button></div>
+        </form>`), (m, close) => {
+        m.querySelector('[data-close]').onclick = close;
+        const sync = () => m.querySelectorAll('.theme-chip').forEach((c) => c.classList.toggle('on', c.querySelector('input').checked));
+        m.querySelectorAll('.theme-chip input').forEach((r) => r.addEventListener('change', () => { sync(); play(r.value, 'checkin'); }));
+        sync();
+        m.querySelector('form').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const body = Object.fromEntries(new FormData(e.target));
+          try {
+            await api('POST', '/api/users', body);
+            close();
+            toast(`${body.fullName} added. They can log in with their PIN now.`, 'success');
+            refreshPage();
+          } catch (x) { m.querySelector('#sf-error').innerHTML = String(html`<div class="form-error">${x.message}</div>`); }
+        });
+      });
     });
 
     el.querySelectorAll('[data-role]').forEach((sel) => sel.addEventListener('change', async () => {
