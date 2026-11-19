@@ -1,12 +1,12 @@
 // Offline support: keeps a copy of the whole app on the tablet.
 // Generated list of files; the version changes whenever any file changes, so updates are picked up.
-const VERSION = '93c6de2eb0';
+const VERSION = 'c1dc485d11';
 const CACHE = 'breakfast-app-' + VERSION;
 const FONT_CACHE = 'breakfast-fonts';
 const FILES = [
   "./",
+  "css/resort.css",
   "css/styles.css",
-  "css/themes.css",
   "icons/icon-192.png",
   "icons/icon-512.png",
   "icons/maskable-512.png",
@@ -31,33 +31,9 @@ const FILES = [
   "manifest.webmanifest",
   "vendor/fonts/OFL-Fraunces.txt",
   "vendor/fonts/OFL-Manrope.txt",
-  "vendor/fonts/OFL-anton.txt",
-  "vendor/fonts/OFL-bebasneue.txt",
-  "vendor/fonts/OFL-blackopsone.txt",
-  "vendor/fonts/OFL-caveat.txt",
-  "vendor/fonts/OFL-chakrapetch.txt",
-  "vendor/fonts/OFL-cinzel.txt",
-  "vendor/fonts/OFL-graduate.txt",
-  "vendor/fonts/OFL-mplusrounded1c.txt",
-  "vendor/fonts/OFL-orbitron.txt",
-  "vendor/fonts/OFL-spacemono.txt",
-  "vendor/fonts/anton.woff",
-  "vendor/fonts/bebasneue.woff",
-  "vendor/fonts/blackopsone.woff",
-  "vendor/fonts/caveat.woff",
-  "vendor/fonts/chakrapetch-bold.woff",
-  "vendor/fonts/chakrapetch.woff",
-  "vendor/fonts/cinzel.woff",
   "vendor/fonts/fraunces-italic.woff",
-  "vendor/fonts/fraunces-soft.woff",
   "vendor/fonts/fraunces.woff",
-  "vendor/fonts/graduate.woff",
   "vendor/fonts/manrope.woff",
-  "vendor/fonts/mplusrounded-xb.woff",
-  "vendor/fonts/mplusrounded.woff",
-  "vendor/fonts/orbitron.woff",
-  "vendor/fonts/spacemono-bold.woff",
-  "vendor/fonts/spacemono.woff",
   "vendor/pdfjs/pdf.min.mjs",
   "vendor/pdfjs/pdf.worker.min.mjs"
 ];
