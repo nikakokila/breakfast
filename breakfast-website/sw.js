@@ -1,6 +1,6 @@
 // Offline support: keeps a copy of the whole app on the tablet.
 // Generated list of files; the version changes whenever any file changes, so updates are picked up.
-const VERSION = 'c1dc485d11';
+const VERSION = 'a6429bde6d';
 const CACHE = 'breakfast-app-' + VERSION;
 const FONT_CACHE = 'breakfast-fonts';
 const FILES = [
@@ -38,8 +38,9 @@ const FILES = [
   "vendor/pdfjs/pdf.worker.min.mjs"
 ];
 
+// Always download fresh copies (never the browser's own older cache) so an update is complete.
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
