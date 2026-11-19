@@ -3,8 +3,21 @@
 // 2) Shows an "Install app" button when Chrome allows installing.
 
 if ('serviceWorker' in navigator) {
+  // When an update has finished installing, reload once so the new version shows straight away.
+  // (Saved data lives in the tablet's database, so nothing is lost.) Waits if someone is typing.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  let waits = 0;
+  const reloadSoon = () => {
+    if (reloaded) return;
+    const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && document.activeElement.value;
+    if ((typing || document.querySelector('.modal-backdrop')) && waits++ < 5) { setTimeout(reloadSoon, 4000); return; }
+    reloaded = true;
+    location.reload();
+  };
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadSoon(); });
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Offline mode unavailable:', err));
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch((err) => console.warn('Offline mode unavailable:', err));
   });
 }
 
