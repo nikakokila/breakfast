@@ -146,6 +146,9 @@ export async function refreshMe() {
 export async function refreshBrand() {
   try { state.brand = await api('GET', '/api/branding'); } catch { /* keep defaults */ }
   document.title = state.brand.name;
+  // A manager-uploaded header photo replaces the painted sunrise.
+  document.documentElement.style.setProperty('--hero-img', state.brand.hero ? `url("${state.brand.hero}")` : 'none');
+  document.documentElement.classList.toggle('has-hero-photo', !!state.brand.hero);
 }
 
 window.addEventListener('auth-lost', () => {

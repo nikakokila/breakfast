@@ -1,7 +1,6 @@
 // SETTINGS — profile picture, nickname, account info, log out, and team roles for managers.
-import { api, html, avatar, toast, confirmDialog, fmtDay, setBusy, openModal } from './lib.js';
+import { api, html, raw, avatar, toast, confirmDialog, fmtDay, setBusy, openModal } from './lib.js';
 import { state, view, go, renderShell, refreshBrand, downloadBackup, restoreFromFile, lockApp } from './app.js';
-import { THEMES, themeIds, applyTheme, welcome } from './themes.js';
 import { play, isMuted, setMuted } from './sounds.js';
 
 // Resize the chosen photo in the browser to a 320×320 square before uploading.
@@ -29,6 +28,20 @@ async function toLogoImage(file) {
   canvas.height = Math.max(1, Math.round(bitmap.height * scale));
   canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL('image/png');
+}
+
+// Shrinks a header photo to 1600 pixels wide (JPEG) so it stays small on the tablet.
+async function toHeroImage(file) {
+  if (!file.type.startsWith('image/')) throw new Error('Please choose an image file.');
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / bitmap.width, 900 / bitmap.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  let q = 0.82, url = canvas.toDataURL('image/jpeg', q);
+  while (url.length > 900000 && q > 0.4) { q -= 0.1; url = canvas.toDataURL('image/jpeg', q); }
+  return url;
 }
 
 export async function renderSettings() {
@@ -96,16 +109,10 @@ export async function renderSettings() {
           </div>
 
           <div class="card">
-            <div class="card-head"><h2>Your look and sound</h2><span class="muted small">${THEMES[me.theme]?.label || 'Hilton heritage'}</span></div>
-            <div class="card-pad">
-              <div class="theme-grid">${themeIds.map((t) => html`
-                <button type="button" class="theme-chip t-${t} ${me.theme === t ? 'on' : ''}" data-my-theme="${t}">
-                  <span class="swatch"></span><b>${THEMES[t].label}</b><small>${THEMES[t].note}</small>
-                </button>`)}</div>
-              <div class="theme-actions">
-                <button type="button" class="btn btn-outline btn-sm" id="preview-sound">Play my sounds</button>
-                <label class="check-row" style="margin:0"><input type="checkbox" id="mute-box" ${isMuted() ? 'checked' : ''}> Mute all sounds on this tablet</label>
-              </div>
+            <div class="card-head"><h2>Sounds</h2><span class="muted small">${isMuted() ? 'Muted' : 'On'}</span></div>
+            <div class="card-pad theme-actions">
+              <button type="button" class="btn btn-outline btn-sm" id="preview-sound">Play the app sounds</button>
+              <label class="check-row" style="margin:0"><input type="checkbox" id="mute-box" ${isMuted() ? 'checked' : ''}> Mute all sounds on this tablet</label>
             </div>
           </div>
 
@@ -113,12 +120,10 @@ export async function renderSettings() {
             <div class="card">
               <div class="card-head"><h2>Team</h2><div class="head-actions"><span class="muted small">${team.length} people</span><button class="btn btn-gold btn-sm" type="button" id="add-staff">+ Add employee</button></div></div>
               <div class="table-wrap"><table class="stack">
-                <thead><tr><th>Employee</th><th>Theme</th><th>Role</th><th></th></tr></thead>
+                <thead><tr><th>Employee</th><th>Joined</th><th>Role</th><th></th></tr></thead>
                 <tbody>${team.map((u) => html`<tr>
                   <td class="td-name"><div style="display:flex;align-items:center;gap:10px">${avatar(u)}<div><b>${u.nickname}</b><div class="muted small">${u.fullName}</div></div></div></td>
-                  <td data-label="Theme"><select class="select" style="height:36px;width:auto" data-theme-of="${u.id}">
-                    ${themeIds.map((t) => html`<option value="${t}" ${u.theme === t ? 'selected' : ''}>${THEMES[t].label}</option>`)}
-                  </select></td>
+                  <td class="muted small" data-label="Joined">${fmtDay(u.createdAt)}</td>
                   <td data-label="Role"><select class="select" style="height:36px;width:auto" data-role="${u.id}">
                     <option value="employee" ${u.role === 'employee' ? 'selected' : ''}>Employee</option>
                     <option value="manager" ${u.role === 'manager' ? 'selected' : ''}>Manager</option>
@@ -142,6 +147,17 @@ export async function renderSettings() {
                     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
                       <label class="btn btn-outline btn-sm" style="cursor:pointer">${app.hasLogo ? 'Change logo' : 'Upload logo'}<input type="file" id="logo-file" accept="image/*" class="sr-only"></label>
                       ${app.hasLogo ? html`<button type="button" class="btn btn-ghost btn-sm" id="logo-remove">Use the default emblem</button>` : ''}
+                    </div>
+                  </div>
+                </div>
+                <div class="logo-row">
+                  <div class="hero-preview" ${state.brand.hero ? raw(`style="background-image:url('${state.brand.hero}')"`) : ''}></div>
+                  <div>
+                    <b>Header photo</b>
+                    <p class="muted small">The big picture at the top of every screen. A wide photo of the restaurant or breakfast buffet works best.</p>
+                    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                      <label class="btn btn-outline btn-sm" style="cursor:pointer">${app.hasHero ? 'Change photo' : 'Upload photo'}<input type="file" id="hero-file" accept="image/*" class="sr-only"></label>
+                      ${app.hasHero ? html`<button type="button" class="btn btn-ghost btn-sm" id="hero-remove">Use the sunrise instead</button>` : ''}
                     </div>
                   </div>
                 </div>
@@ -268,6 +284,22 @@ export async function renderSettings() {
         refreshPage();
       } catch (err) { toast(err.message || 'Could not read that image.', 'error'); }
     });
+    el.querySelector('#hero-file')?.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        await api('PUT', '/api/settings/hero', { dataUrl: await toHeroImage(file) });
+        await refreshBrand();
+        toast('Header photo updated.', 'success');
+        refreshPage();
+      } catch (err) { toast(err.message || 'Could not read that image.', 'error'); }
+    });
+    el.querySelector('#hero-remove')?.addEventListener('click', async () => {
+      await api('DELETE', '/api/settings/hero');
+      await refreshBrand();
+      toast('Using the sunrise header.');
+      refreshPage();
+    });
     el.querySelector('#logo-remove')?.addEventListener('click', async () => {
       await api('DELETE', '/api/settings/logo');
       await refreshBrand();
@@ -289,29 +321,14 @@ export async function renderSettings() {
     });
 
     // ----- look and sound -----
-    el.querySelectorAll('[data-my-theme]').forEach((b) => b.addEventListener('click', async () => {
-      try {
-        const { user } = await api('PUT', '/api/me/theme', { theme: b.dataset.myTheme });
-        state.me = user;
-        await welcome(user);
-        refreshPage();
-      } catch (err) { toast(err.message, 'error'); }
-    }));
     el.querySelector('#preview-sound')?.addEventListener('click', () => {
-      play(me.theme, 'login');
-      setTimeout(() => play(me.theme, 'checkin'), 1800);
-      setTimeout(() => play(me.theme, 'warn'), 2800);
+      play('resort', 'login');
+      setTimeout(() => play('resort', 'checkin'), 1800);
+      setTimeout(() => play('resort', 'warn'), 2800);
     });
     el.querySelector('#mute-box')?.addEventListener('change', (e) => { setMuted(e.target.checked); renderShell('settings'); draw(); });
 
     // ----- manager: team -----
-    el.querySelectorAll('[data-theme-of]').forEach((sel) => sel.addEventListener('change', async () => {
-      try {
-        await api('PUT', `/api/users/${sel.dataset.themeOf}/theme`, { theme: sel.value });
-        toast(`Theme set to ${THEMES[sel.value].label}.`, 'success');
-        if (Number(sel.dataset.themeOf) === me.id) { state.me.theme = sel.value; applyTheme(sel.value); refreshPage(); }
-      } catch (err) { toast(err.message, 'error'); refreshPage(); }
-    }));
     el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => {
       const ok = await confirmDialog({
         title: `Remove ${b.dataset.name}?`,
@@ -331,15 +348,11 @@ export async function renderSettings() {
             <div class="field"><label for="sf-pin">4-digit PIN</label><input class="input pin-input" id="sf-pin" name="pin" type="password" inputmode="numeric" maxlength="4" required></div>
             <div class="field"><label for="sf-role">Role</label><select class="select" id="sf-role" name="role"><option value="employee">Employee</option><option value="manager">Manager</option></select></div>
           </div>
-          <div class="field"><label>Theme</label><div class="theme-grid small">${themeIds.map((t, i) => html`
-            <label class="theme-chip t-${t}"><input type="radio" name="theme" value="${t}" ${i === 0 ? 'checked' : ''} class="sr-only"><span class="swatch"></span><b>${THEMES[t].label}</b></label>`)}</div></div>
+
         </div>
         <div class="modal-foot"><button type="button" class="btn btn-outline" data-close>Cancel</button><button class="btn btn-gold" type="submit">Add employee</button></div>
         </form>`), (m, close) => {
         m.querySelector('[data-close]').onclick = close;
-        const sync = () => m.querySelectorAll('.theme-chip').forEach((c) => c.classList.toggle('on', c.querySelector('input').checked));
-        m.querySelectorAll('.theme-chip input').forEach((r) => r.addEventListener('change', () => { sync(); play(r.value, 'checkin'); }));
-        sync();
         m.querySelector('form').addEventListener('submit', async (e) => {
           e.preventDefault();
           const body = Object.fromEntries(new FormData(e.target));
