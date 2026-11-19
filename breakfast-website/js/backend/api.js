@@ -50,20 +50,21 @@ const activeUsers = () => rows('users').filter((u) => !u.disabled);
 // The breakfast team, added automatically once (the owner chose to keep these PINs in the app).
 // If a manager later removes someone, they are not added again.
 const TEAM = [
+  ['Manager', '1707', 'hilton', 'manager'],
   ['Duta', '1801', 'darkroom'], ['Nika', '1802', 'tactical'], ['Luka', '1803', 'cocoa'], ['Miro', '1804', 'prog'],
   ['Dachi', '1805', 'idol'], ['Saba', '1806', 'brother'], ['Levani', '1807', 'goat'],
 ];
-const TEAM_VERSION = 1;
+const TEAM_VERSION = 2;
 async function ensureTeam() {
   if (data.users.size === 0 || Number(settings.get('teamSeeded') || 0) >= TEAM_VERSION) return;
   const added = [];
-  for (const [name, pin, theme] of TEAM) {
+  for (const [name, pin, theme, role = 'employee'] of TEAM) {
     if (rows('users').some((u) => u.nickname.toLowerCase() === name.toLowerCase())) continue;
     const tx = begin();
     try {
       const fields = await pinFields(tx, pin);
-      tx.insert('users', { ...fields, full_name: name, nickname: name, role: 'employee', theme, avatar: null, created_at: now() });
-      audit(tx, null, 'account_created', null, { nickname: name, role: 'employee', theme, by: 'built-in team list' });
+      tx.insert('users', { ...fields, full_name: name, nickname: name, role, theme, avatar: null, created_at: now() });
+      audit(tx, null, 'account_created', null, { nickname: name, role, theme, by: 'built-in team list' });
       await tx.commit();
       added.push(name);
     } catch { /* PIN already used by someone else: skip this person */ }
@@ -240,6 +241,7 @@ route('GET', '/api/branding', () => ({
   name: settings.get('brandName') || DEFAULT_BRAND.name,
   subtitle: settings.get('brandSubtitle') ?? DEFAULT_BRAND.subtitle,
   logo: settings.get('logo') || 'img/emblem.svg',
+  hero: settings.get('hero') || null,
   lockMinutes: lockMinutes(),
 }));
 
@@ -249,6 +251,7 @@ route('GET', '/api/settings', () => {
     brandName: settings.get('brandName') || DEFAULT_BRAND.name,
     brandSubtitle: settings.get('brandSubtitle') ?? '',
     hasLogo: !!settings.get('logo'),
+    hasHero: !!settings.get('hero'),
     accessCode: settings.get('accessCode') || '',
     deleteCode: settings.get('deleteCode') || '',
     lastBackupAt: settings.get('lastBackupAt') || null,
@@ -279,6 +282,26 @@ route('PUT', '/api/settings/logo', async ({ body }) => {
   const tx = begin();
   tx.setting('logo', checkImage(body.dataUrl, 400 * 1024));
   audit(tx, manager, 'logo_changed');
+  await tx.commit();
+  return { ok: true };
+});
+
+// Photo shown in the large header area of every screen (Resort design).
+route('PUT', '/api/settings/hero', async ({ body }) => {
+  const manager = requireManager();
+  const hero = checkImage(body.dataUrl, 700 * 1024);
+  const tx = begin();
+  tx.setting('hero', hero);
+  audit(tx, manager, 'hero_changed');
+  await tx.commit();
+  return { ok: true };
+});
+
+route('DELETE', '/api/settings/hero', async () => {
+  const manager = requireManager();
+  const tx = begin();
+  tx.setting('hero', null);
+  audit(tx, manager, 'hero_removed');
   await tx.commit();
   return { ok: true };
 });
