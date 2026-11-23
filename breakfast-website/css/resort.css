@@ -297,25 +297,25 @@ tbody tr:hover td { background: var(--paper); }
 .import-card.reading { opacity: .7; pointer-events: none; border-style: solid; }
 .ic-head { display: flex; gap: 12px; align-items: center; }
 .ic-head .dz-icon { flex: none; margin: 0; }
-.slots, .imp-slots { display: grid; gap: 8px; }
-.slot, .imp-slot { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; text-align: left; width: 100%;
+.il-list, .il-group { display: grid; gap: 8px; }
+.il-item, .il-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; text-align: left; width: 100%;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--ink); font: inherit; }
-.slot { cursor: pointer; transition: border-color .15s, box-shadow .15s; }
-.slot:hover, .slot:focus-visible { border-color: var(--navy-700); box-shadow: 0 0 0 3px rgba(47, 93, 98, .12); outline: none; }
-.slot-n { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--diamond-soft); color: var(--navy-700); font-weight: 800; font-size: 13px; }
-.slot-n.done { background: var(--success-soft); color: var(--success); }
-.slot-n.done svg { width: 16px; height: 16px; }
-.slot-text { display: grid; gap: 1px; min-width: 0; }
-.slot-text b { font-size: 14.5px; color: var(--heading); }
-.slot-text small { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
-.slot-text .file-name { color: var(--ink); font-weight: 600; }
-.slot-plus { color: var(--navy-700); display: grid; }
-.slot-plus svg { width: 18px; height: 18px; }
-.imp-slot.empty { border-style: dashed; background: var(--paper); cursor: pointer; }
-.imp-slot.empty:hover { border-color: var(--navy-700); }
-.slot-actions { display: flex; gap: 2px; align-self: start; }
-.slot-x { min-width: 36px; }
-.slot-warn { margin-top: 5px; font-size: 12.5px; color: #8a5a12; background: #fff5e2; border-radius: 8px; padding: 6px 9px; }
+.il-item { cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.il-item:hover, .il-item:focus-visible { border-color: var(--navy-700); box-shadow: 0 0 0 3px rgba(47, 93, 98, .12); outline: none; }
+.il-n { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--diamond-soft); color: var(--navy-700); font-weight: 800; font-size: 13px; }
+.il-n.done { background: var(--success-soft); color: var(--success); }
+.il-n.done svg { width: 16px; height: 16px; }
+.il-text { display: grid; gap: 1px; min-width: 0; }
+.il-text b { font-size: 14.5px; color: var(--heading); }
+.il-text small { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.il-text .file-name { color: var(--ink); font-weight: 600; }
+.il-plus { color: var(--navy-700); display: grid; }
+.il-plus svg { width: 18px; height: 18px; }
+.il-row.empty { border-style: dashed; background: var(--paper); cursor: pointer; }
+.il-row.empty:hover { border-color: var(--navy-700); }
+.il-actions { display: flex; gap: 2px; align-self: start; }
+.il-x { min-width: 36px; }
+.il-warn { margin-top: 5px; font-size: 12.5px; color: #8a5a12; background: #fff5e2; border-radius: 8px; padding: 6px 9px; }
 .sheet-pick { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-top: 4px; }
 .select-sm { height: 34px; padding: 0 30px 0 10px; font-size: 14px; width: auto; }
 .imp-day { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -343,8 +343,8 @@ tbody tr:hover td { background: var(--paper); }
 .room-tag { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase; color: var(--navy-700); background: var(--diamond-soft); padding: 4px 10px; border-radius: 20px; }
 .room-alert h2 { color: var(--navy-700); }
 @media (max-width: 720px) {
-  .slot-actions { grid-column: 2 / -1; justify-self: start; }
-  .imp-slot { grid-template-columns: 30px minmax(0, 1fr); }
+  .il-actions { grid-column: 2 / -1; justify-self: start; }
+  .il-row { grid-template-columns: 30px minmax(0, 1fr); }
   .room-row { grid-template-columns: minmax(0, 1fr) 80px; }
   .imp-details th:nth-child(4), .imp-details td:nth-child(4) { display: none; }
 }
