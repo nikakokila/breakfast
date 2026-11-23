@@ -48,10 +48,10 @@ export async function renderPrepare() {
     <div class="prep-grid">
       <div class="prep-side">
       <label class="dropzone" id="dropzone" tabindex="0">
-        <input type="file" id="import-file" accept=".txt,.pdf,text/plain,application/pdf" class="sr-only">
+        <input type="file" id="import-file" accept=".txt,.pdf,.csv,.xlsx,text/plain,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="sr-only">
         <span class="dz-icon">${icons.upload}</span>
         <span class="dz-title">Import guest list</span>
-        <span class="dz-text">Drag &amp; drop a <b>TXT</b> or <b>PDF</b> file here, or <u>browse</u></span>
+        <span class="dz-text">Drag &amp; drop an <b>Opera Excel report</b>, <b>TXT</b> or <b>PDF</b> file here, or <u>browse</u></span>
         <span class="dz-text small">One guest per line: name · room · membership · <a href="#" id="template-link">download template</a></span>
       </label>
       <div class="card prep-form">
@@ -269,7 +269,7 @@ export async function renderPrepare() {
     }
   });
 
-  // ---------- Import from a TXT or PDF file ----------
+  // ---------- Import from a TXT, PDF or Excel file ----------
   const dropzone = el.querySelector('#dropzone');
   const fileInput = el.querySelector('#import-file');
 
@@ -300,13 +300,14 @@ export async function renderPrepare() {
     showImportPreview(file.name, parsed);
   }
 
-  function showImportPreview(fileName, { rows, hasRankColumn, ignored }) {
+  function showImportPreview(fileName, { rows, hasRankColumn, ignored, autoMember, source }) {
     // Check every row with the same rules as manual entry.
     const key = (n, r) => `${normalize(n)}|${r}`;
     const existing = new Set(guests.map((g) => key(g.fullName, g.room)));
     const seen = new Set();
     const checked = rows.map((row) => {
       const problems = [];
+      if (row.skipReason) problems.push(`Status: ${row.skipReason}`);
       if (row.fullName.length < 2) problems.push('Missing guest name');
       const room = parseRoom(row.room);
       if (!room.ok) problems.push(row.room ? `Room ${row.room}: ${room.error}` : 'Missing room number');
@@ -357,10 +358,10 @@ export async function renderPrepare() {
       `);
     };
 
-    let fillMember = false;
+    let fillMember = !!autoMember;
     let mode = 'add';
     openModal(String(html`
-      <div class="modal-head"><h2>Import guest list</h2><p>${fileName}</p></div>
+      <div class="modal-head"><h2>Import guest list</h2><p>${fileName}${source ? html` · <b>${source}</b>` : ''}</p></div>
       <div class="modal-body" id="import-body"></div>
       <div class="modal-foot"><button class="btn btn-outline" data-close>Cancel</button><button class="btn btn-gold" id="do-import">Import guests</button></div>
     `), (m, close) => {
