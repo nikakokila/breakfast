@@ -159,7 +159,7 @@ export function computeStats(shiftId) {
   }
   const checkedIn = counts.DIAMOND + counts.GOLD + counts.MEMBER;
   return {
-    expected: guests.length, checkedIn, remaining: guests.length - checkedIn, notArrived: guests.length - checkedIn,
+    expected: guests.length, expectedPeople: peopleExpected(guests), checkedIn, remaining: guests.length - checkedIn, notArrived: guests.length - checkedIn,
     diamond: counts.DIAMOND, gold: counts.GOLD, member: counts.MEMBER, unknown, totalArrivals: checkedIn + unknown,
   };
 }
@@ -172,7 +172,7 @@ function shiftPayload(shift) {
     .map((g) => {
       const a = byGuest.get(g.id);
       return {
-        id: g.id, fullName: g.full_name, room: g.room, floor: g.floor, rank: g.rank,
+        id: g.id, fullName: g.full_name, room: g.room, floor: g.floor, rank: g.rank, pax: g.pax ?? 1,
         arrival: a ? { id: a.id, arrivedAt: a.arrived_at, checkedInName: a.checked_in_name, checkedInBy: a.checked_in_by } : null,
       };
     });
@@ -189,6 +189,21 @@ function shiftPayload(shift) {
     },
     guests, unknownArrivals, recent, stats: computeStats(shift.id),
   };
+}
+
+// How many people a guest entry covers (0 = counted on another entry of the same room). Old data has none: 1.
+function cleanPax(value) {
+  if (value === undefined || value === null || value === '') return 1;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 20) throw new ApiError(400, 'People in a room must be a number from 1 to 20.');
+  return n;
+}
+function peopleExpected(guests) {
+  const rooms = new Map();
+  for (const g of guests) { const r = rooms.get(g.room) || { sum: 0, count: 0 }; r.sum += g.pax ?? 1; r.count++; rooms.set(g.room, r); }
+  let total = 0;
+  for (const r of rooms.values()) total += Math.max(r.sum, r.count);
+  return total;
 }
 
 const hotelTime = (iso) => (iso ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(iso)) : '');
@@ -544,7 +559,7 @@ route('POST', '/api/shifts', async ({ body }) => {
     if (!room.ok) throw new ApiError(400, `${where} (${fullName}): ${room.error}`);
     const rank = String(g.rank ?? '').toUpperCase();
     if (!RANKS.includes(rank)) throw new ApiError(400, `${where} (${fullName}): membership must be Diamond, Gold or Member.`);
-    return { fullName, room: room.room, floor: room.floor, rank };
+    return { fullName, room: room.room, floor: room.floor, rank, pax: cleanPax(g.pax) };
   });
   if (activeShift()) throw new ApiError(409, 'Another shift is already active. Finish it before starting a new one.');
   const tx = begin();
@@ -552,7 +567,7 @@ route('POST', '/api/shifts', async ({ body }) => {
     shift_date: todayLocal(), started_at: now(), finished_at: null, started_by: user.id, started_by_name: user.nickname,
     finished_by: null, finished_by_name: null, status: 'ACTIVE', final_stats: null,
   });
-  for (const g of guests) tx.insert('guests', { shift_id: shift.id, full_name: g.fullName, room: g.room, floor: g.floor, rank: g.rank });
+  for (const g of guests) tx.insert('guests', { shift_id: shift.id, full_name: g.fullName, room: g.room, floor: g.floor, rank: g.rank, pax: g.pax });
   audit(tx, user, 'shift_started', shift.id, { expectedGuests: guests.length });
   await tx.commit();
   return shiftPayload(shift);
@@ -619,8 +634,9 @@ route('POST', '/api/shifts/:id/guests', async ({ body, params }) => {
     throw new ApiError(409, `${fullName} in room ${room.room} is already on this shift’s list.`);
   }
   const tx = begin();
-  const guest = tx.insert('guests', { shift_id: shift.id, full_name: fullName, room: room.room, floor: room.floor, rank });
-  audit(tx, user, 'guest_added', shift.id, { name: fullName, room: room.room, rank });
+  const pax = cleanPax(body.pax);
+  const guest = tx.insert('guests', { shift_id: shift.id, full_name: fullName, room: room.room, floor: room.floor, rank, pax });
+  audit(tx, user, 'guest_added', shift.id, { name: fullName, room: room.room, rank, pax });
   await tx.commit();
   return { ...shiftPayload(shift), addedGuestId: guest.id };
 });
