@@ -4,7 +4,7 @@ This is the stand-alone version for **one shared Android tablet**. It needs no l
 
 - All accounts, shifts and statistics are saved **on the tablet itself**.
 - It works **without internet** once installed.
-- It has the same screens as the laptop version: guest list import (Opera Excel report, TXT, PDF or CSV), check-in, unknown guests, late guests, finish shift, previous shifts, analytics, CSV exports, delete shift with a code.
+- It has the same screens as the laptop version: guest list import (up to three lists combined: the Opera package report, the Diamond · Gold · Silver list and the complimentary-breakfast request report; Excel .xlsx or .xls, TXT, PDF or CSV), check-in, unknown guests, late guests, finish shift, previous shifts, analytics, CSV exports, delete shift with a code.
 
 The app's *code* is put on a free website (GitHub Pages) only so the tablet can install it. **No guest data ever goes there.**
 
@@ -55,6 +55,16 @@ Design: "Resort" — a sunrise header on every screen (or your own photo: Settin
 
 
 ---
+
+## Importing the three lists
+
+Start New Shift → Import guest lists has three boxes. Each file is recognised by its headings, so it can be dropped anywhere.
+
+1. **Breakfast list** (Opera package report): everyone on it is expected.
+2. **Diamond · Gold · Silver** (reception's breakfast report): Diamond and Gold always get breakfast. Guests already on the list become Diamond/Gold; other Diamond/Gold rooms are added as one entry per room with its number of people (PAX). Silver and "booking" rooms only if they are on the breakfast list.
+3. **Complimentary breakfast** (Opera request report): always added, if they slept at the hotel the night before the breakfast date. Diamond/Gold keep their tier, everyone else is Member.
+
+The number of people per room is shown during the shift. Checking in a room for 2+ people a second time shows "Room already registered · expecting N people" instead of a duplicate warning.
 
 ## Backups — important
 
