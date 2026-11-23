@@ -1,15 +1,32 @@
 // START NEW SHIFT (guest preparation) and the ACTIVE BREAKFAST SHIFT screen.
 import { api, html, raw, esc, icons, toast, openModal, confirmDialog, fmtTime, rankBadge, setBusy, normalize } from './lib.js';
 import { parseRoom } from './rooms.js';
-import { readGuestFile, extractGuests, templateTxt } from './guest-import.js';
+import { readImportFile, recognise, readPlainList, templateTxt, todayIso, addDays, fmtDay } from './guest-import.js';
+import { mergeLists, peopleByRoom, totalPeople, paxForRoom } from './guest-merge.js';
 import { state, view, go, refreshMe, buzz } from './app.js';
 import { celebrate } from './celebrate.js';
 import { play } from './sounds.js';
 import { currentTheme } from './themes.js';
 
 const CHECK_SVG = raw('<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>');
+const PEOPLE_SVG = raw('<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3.2 19.5c.6-3.3 3-5.2 5.8-5.2s5.2 1.9 5.8 5.2"/><circle cx="17.2" cy="9" r="2.6"/><path d="M16 14.3c2.4.2 4.2 1.9 4.8 5"/></svg>');
 
 const RANKS = ['DIAMOND', 'GOLD', 'MEMBER'];
+const PEOPLE_CHOICES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+// "2 people" from this room (shown only when more than one person is expected).
+export const paxChip = (n, long = false) => (n > 1 ? html`<span class="pax" title="People expected from this room">${PEOPLE_SVG}${long ? `${n} people` : n}</span>` : '');
+
+// The three lists that can be imported. Each file is recognised by its headings, wherever it is dropped.
+const LISTS = [
+  { kind: 'breakfast', title: 'Breakfast list', hint: 'Opera package report — who is expected', empty: 'Who is expected at breakfast (Opera package report, TXT or PDF)' },
+  { kind: 'tier', title: 'Diamond · Gold · Silver', hint: 'Tier list — optional', empty: 'Diamond and Gold always get breakfast; Silver only if on the breakfast list' },
+  { kind: 'comp', title: 'Complimentary breakfast', hint: 'Request report — optional', empty: 'Guests given free breakfast (Opera request report)' },
+];
+const LIST_NAME = { breakfast: 'breakfast list', tier: 'Diamond · Gold · Silver list', comp: 'complimentary list' };
+const ACCEPT = '.xlsx,.xls,.pdf,.txt,.csv,text/plain,text/csv,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 // =====================================================================
 //  START NEW SHIFT — prepare the expected guest list
@@ -41,19 +58,30 @@ export async function renderPrepare() {
       <div>
         <div class="eyebrow">Start new shift · Step 1 of 2</div>
         <h1>Prepare the guest list</h1>
-        <p>Enter every expected breakfast guest. Only the room number is needed — the floor is worked out automatically.</p>
+        <p>Import today’s lists or enter guests by hand. Only the room number is needed — the floor is worked out automatically.</p>
       </div>
     </div>
 
     <div class="prep-grid">
       <div class="prep-side">
-      <label class="dropzone" id="dropzone" tabindex="0">
-        <input type="file" id="import-file" accept=".txt,.pdf,.csv,.xlsx,text/plain,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="sr-only">
-        <span class="dz-icon">${icons.upload}</span>
-        <span class="dz-title">Import guest list</span>
-        <span class="dz-text">Drag &amp; drop an <b>Opera Excel report</b>, <b>TXT</b> or <b>PDF</b> file here, or <u>browse</u></span>
-        <span class="dz-text small">One guest per line: name · room · membership · <a href="#" id="template-link">download template</a></span>
-      </label>
+      <div class="card import-card" id="dropzone">
+        <input type="file" id="import-file" multiple accept="${ACCEPT}" class="sr-only">
+        <div class="ic-head">
+          <span class="dz-icon">${icons.upload}</span>
+          <div>
+            <div class="dz-title">Import guest lists</div>
+            <div class="dz-text">Tap a list or drop files here · Excel, PDF or TXT</div>
+          </div>
+        </div>
+        <div class="slots">
+          ${LISTS.map((s, i) => html`<button type="button" class="slot" data-slot="${s.kind}">
+            <span class="slot-n">${i + 1}</span>
+            <span class="slot-text"><b>${s.title}</b><small>${s.hint}</small></span>
+            <span class="slot-plus" aria-hidden="true">${icons.plus}</span>
+          </button>`)}
+        </div>
+        <span class="dz-text small">Typing a list yourself? <a href="#" id="template-link">Download a TXT template</a></span>
+      </div>
       <div class="card prep-form">
         <div class="card-head"><h2 id="form-title">Add a guest</h2></div>
         <form class="card-pad" id="guest-form" novalidate>
@@ -68,10 +96,19 @@ export async function renderPrepare() {
               <input class="input" id="g-last" autocomplete="off" maxlength="50" placeholder="e.g. Rossi">
             </div>
           </div>
-          <div class="field">
-            <label for="g-room">Room number</label>
-            <input class="input room-input" id="g-room" inputmode="numeric" autocomplete="off" maxlength="4" placeholder="e.g. 1208">
-            <span class="hint" id="room-hint">Floors 5–15, rooms 01–18.</span>
+          <div class="room-row">
+            <div class="field">
+              <label for="g-room">Room number</label>
+              <input class="input room-input" id="g-room" inputmode="numeric" autocomplete="off" maxlength="4" placeholder="e.g. 1208">
+              <span class="hint" id="room-hint">Floors 5–15, rooms 01–18.</span>
+            </div>
+            <div class="field">
+              <label for="g-people">People</label>
+              <select class="select people-select" id="g-people" title="How many people from this room come to breakfast">
+                ${PEOPLE_CHOICES.map((n) => html`<option value="${n}">${n}</option>`)}
+              </select>
+              <span class="hint">in room</span>
+            </div>
           </div>
           <div class="field">
             <label for="g-rank">Membership rank</label>
@@ -94,6 +131,7 @@ export async function renderPrepare() {
         <div class="card-head">
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
             <span class="count-chip"><b id="count">0</b> expected guests</span>
+            <span class="people-total" id="people-total"></span>
             <div class="rank-tally" id="tally"></div>
           </div>
           <button class="btn btn-ghost btn-sm" id="clear-all">Clear list</button>
@@ -114,23 +152,38 @@ export async function renderPrepare() {
   // Imported guests only have a full name; split it on the first space for editing.
   const splitName = (full) => { const i = full.indexOf(' '); return i < 0 ? [full, ''] : [full.slice(0, i), full.slice(i + 1)]; };
   const roomIn = el.querySelector('#g-room');
+  const peopleIn = el.querySelector('#g-people');
   const rankIn = el.querySelector('#g-rank');
   const roomHint = el.querySelector('#room-hint');
   const formError = el.querySelector('#form-error');
+  let peopleTouched = false;
+  const setPeople = (n) => {
+    const v = Math.max(1, Math.min(20, n || 1));
+    if (![...peopleIn.options].some((o) => Number(o.value) === v)) peopleIn.add(new Option(String(v), String(v)));
+    peopleIn.value = String(v);
+  };
 
   function updateRoomHint() {
     const v = roomIn.value.trim();
     roomIn.classList.remove('invalid');
     if (!v) { roomHint.className = 'hint'; roomHint.textContent = 'Floors 5–15, rooms 01–18.'; return; }
     const r = parseRoom(v);
-    if (r.ok) { roomHint.className = 'hint ok'; roomHint.textContent = `✓ Floor ${r.floor} · Room ${String(r.position).padStart(2, '0')}`; }
-    else if (v.length >= 3) { roomHint.className = 'hint err'; roomHint.textContent = r.error; roomIn.classList.add('invalid'); }
+    if (r.ok) {
+      roomHint.className = 'hint ok';
+      const others = guests.filter((g) => g.room === r.room && g.id !== editingId);
+      roomHint.textContent = `✓ Floor ${r.floor} · Room ${String(r.position).padStart(2, '0')}${others.length ? ` · ${plural(others.length, 'guest')} already listed` : ''}`;
+      // Show how many people this room already has, unless the number was changed by hand.
+      if (!peopleTouched && !editingId) setPeople(others.length ? peopleByRoom(guests).get(r.room) : 1);
+    } else if (v.length >= 3) { roomHint.className = 'hint err'; roomHint.textContent = r.error; roomIn.classList.add('invalid'); }
     else { roomHint.className = 'hint'; roomHint.textContent = 'Keep typing…'; }
   }
   roomIn.addEventListener('input', () => { roomIn.value = roomIn.value.replace(/\D/g, ''); updateRoomHint(); });
+  peopleIn.addEventListener('change', () => { peopleTouched = true; });
 
   function drawList() {
     el.querySelector('#count').textContent = guests.length;
+    const people = totalPeople(guests);
+    el.querySelector('#people-total').innerHTML = guests.length ? String(html`${PEOPLE_SVG}<b>${people}</b> ${people === 1 ? 'person' : 'people'}`) : '';
     const tally = Object.fromEntries(RANKS.map((r) => [r, guests.filter((g) => g.rank === r).length]));
     el.querySelector('#tally').innerHTML = String(html`${RANKS.map((r) => html`<span class="badge ${r}">${tally[r]} ${r}</span>`)}`);
     el.querySelector('#start-btn').disabled = guests.length === 0;
@@ -138,9 +191,10 @@ export async function renderPrepare() {
 
     const list = el.querySelector('#list');
     if (!guests.length) {
-      list.innerHTML = String(html`<div class="empty"><div class="empty-icon">${icons.guests}</div><h3>No guests yet</h3><p>Guests you add will appear here.</p></div>`);
+      list.innerHTML = String(html`<div class="empty"><div class="empty-icon">${icons.guests}</div><h3>No guests yet</h3><p>Import the lists or add guests by hand. They will appear here.</p></div>`);
       return;
     }
+    const roomPeople = peopleByRoom(guests);
     const rows = [...guests].reverse(); // newest first, so you can see what you just typed
     list.innerHTML = String(html`
       <div class="table-wrap"><table class="stack">
@@ -148,12 +202,13 @@ export async function renderPrepare() {
         <tbody>
           ${rows.map((g) => {
             const r = parseRoom(g.room);
+            const n = roomPeople.get(g.room);
             return html`<tr class="${editingId === g.id ? 'editing' : ''}">
               <td class="muted num td-hide-sm">${guests.indexOf(g) + 1}</td>
               <td class="room-cell">${g.room}<span class="floor-sm">Floor ${r.floor}</span></td>
               <td class="floor-tag td-hide-sm">Floor ${r.floor}</td>
-              <td class="td-name"><b>${g.fullName}</b><div class="badge-sm">${rankBadge(g.rank)}</div></td>
-              <td class="td-hide-sm">${rankBadge(g.rank)}</td>
+              <td class="td-name"><b>${g.fullName}</b><div class="badge-sm">${rankBadge(g.rank)} ${paxChip(n)}</div></td>
+              <td class="td-hide-sm"><span class="rank-cell">${rankBadge(g.rank)} ${paxChip(n)}</span></td>
               <td class="actions">
                 <button class="btn btn-ghost btn-sm" data-edit="${g.id}">Edit</button>
                 <button class="btn btn-ghost btn-sm" style="color:var(--danger)" data-remove="${g.id}">Remove</button>
@@ -166,7 +221,9 @@ export async function renderPrepare() {
 
   function resetForm() {
     editingId = null;
+    peopleTouched = false;
     form.reset();
+    setPeople(1);
     formError.innerHTML = '';
     el.querySelector('#form-title').textContent = 'Add a guest';
     el.querySelector('#add-btn').innerHTML = `${icons.plus} Add guest`;
@@ -194,11 +251,12 @@ export async function renderPrepare() {
       (!first ? nameIn : !last ? lastIn : !room.ok ? roomIn : rankIn).focus();
       return;
     }
+    const pax = paxForRoom(guests, room.room, Number(peopleIn.value), editingId);
     if (editingId) {
-      Object.assign(guests.find((g) => g.id === editingId), { fullName, room: room.room, rank });
+      Object.assign(guests.find((g) => g.id === editingId), { fullName, room: room.room, rank, pax });
       toast(`Updated ${fullName}.`, 'success');
     } else {
-      guests.push({ id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()), fullName, room: room.room, rank });
+      guests.push({ id: newId(), fullName, room: room.room, rank, pax });
     }
     save();
     resetForm();
@@ -215,7 +273,9 @@ export async function renderPrepare() {
     if (editId) {
       const g = guests.find((x) => x.id === editId);
       editingId = g.id;
+      peopleTouched = true;
       [nameIn.value, lastIn.value] = splitName(g.fullName); roomIn.value = g.room; rankIn.value = g.rank;
+      setPeople(peopleByRoom(guests).get(g.room));
       updateRoomHint();
       el.querySelector('#form-title').textContent = 'Edit guest';
       el.querySelector('#add-btn').textContent = 'Save changes';
@@ -250,6 +310,7 @@ export async function renderPrepare() {
         <div class="summary-row"><span>${rankBadge('DIAMOND')}</span><b>${tally.DIAMOND}</b></div>
         <div class="summary-row"><span>${rankBadge('GOLD')}</span><b>${tally.GOLD}</b></div>
         <div class="summary-row"><span>${rankBadge('MEMBER')}</span><b>${tally.MEMBER}</b></div>
+        <div class="summary-row"><span>People expected (all rooms)</span><b>${totalPeople(guests)}</b></div>
       </div>`),
       confirmText: 'Start shift',
       variant: 'gold',
@@ -258,7 +319,7 @@ export async function renderPrepare() {
     const btn = el.querySelector('#start-btn');
     setBusy(btn, true, 'Starting…');
     try {
-      await api('POST', '/api/shifts', { guests: guests.map(({ fullName, room, rank }) => ({ fullName, room, rank })) });
+      await api('POST', '/api/shifts', { guests: guests.map(({ fullName, room, rank, pax }) => ({ fullName, room, rank, pax: pax ?? 1 })) });
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       await refreshMe();
       toast('Shift started. Good service!', 'success');
@@ -269,9 +330,12 @@ export async function renderPrepare() {
     }
   });
 
-  // ---------- Import from a TXT, PDF or Excel file ----------
+  // ---------- Import: up to three lists, combined into one ----------
   const dropzone = el.querySelector('#dropzone');
   const fileInput = el.querySelector('#import-file');
+  let pickFor = null; // which list the file picker was opened for
+  const imp = { files: {}, day: todayIso(), fillMember: false, mode: 'add', open: {}, modal: null, redraw: null };
+  const importOpen = () => !!imp.modal?.isConnected;
 
   el.querySelector('#template-link').addEventListener('click', (e) => {
     e.preventDefault();
@@ -282,122 +346,225 @@ export async function renderPrepare() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
 
-  async function handleFile(file) {
-    if (!file) return;
-    let parsed;
-    dropzone.classList.add('reading');
+  const choose = (kind) => { pickFor = kind; fileInput.click(); };
+  el.querySelector('.slots').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-slot]');
+    if (b) choose(b.dataset.slot);
+  });
+  dropzone.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target === dropzone) { e.preventDefault(); choose('breakfast'); }
+  });
+  fileInput.addEventListener('change', () => {
+    const files = [...fileInput.files];
+    fileInput.value = '';
+    handleFiles(files, pickFor);
+    pickFor = null;
+  });
+
+  async function handleFiles(files, hint) {
+    if (!files.length) return;
+    if (!importOpen()) Object.assign(imp, { files: {}, day: todayIso(), fillMember: false, mode: 'add', open: {} });
     const title = dropzone.querySelector('.dz-title');
-    title.textContent = `Reading ${file.name}…`;
+    dropzone.classList.add('reading');
+    let added = 0;
     try {
-      parsed = extractGuests(await readGuestFile(file));
-    } catch (err) {
-      toast(err.message, 'error');
-      return;
+      for (const file of files) {
+        title.textContent = `Reading ${file.name}…`;
+        try {
+          const book = await readImportFile(file);
+          const found = recognise(book);
+          // Lists with known headings go to their own box; a plain list goes where it was dropped.
+          const kind = found.kind || hint || 'breakfast';
+          const data = found.kind ? found.data : readPlainList(book, kind);
+          imp.files[kind] = { fileName: file.name, data };
+          if (kind === 'breakfast') imp.fillMember = !!data.autoMember;
+          if (found.kind && hint && found.kind !== hint) toast(`“${file.name}” is the ${LIST_NAME[found.kind]}, so it was put there.`);
+          added++;
+        } catch (err) {
+          toast(`${file.name}: ${err.message}`, 'error');
+        }
+      }
     } finally {
       dropzone.classList.remove('reading');
-      title.textContent = 'Import guest list';
+      title.textContent = 'Import guest lists';
     }
-    showImportPreview(file.name, parsed);
+    if (added) openImport();
   }
 
-  function showImportPreview(fileName, { rows, hasRankColumn, ignored, autoMember, source }) {
-    // Check every row with the same rules as manual entry.
-    const key = (n, r) => `${normalize(n)}|${r}`;
-    const existing = new Set(guests.map((g) => key(g.fullName, g.room)));
-    const seen = new Set();
-    const checked = rows.map((row) => {
-      const problems = [];
-      if (row.skipReason) problems.push(`Status: ${row.skipReason}`);
-      if (row.fullName.length < 2) problems.push('Missing guest name');
-      const room = parseRoom(row.room);
-      if (!room.ok) problems.push(row.room ? `Room ${row.room}: ${room.error}` : 'Missing room number');
-      const k = key(row.fullName, room.room);
-      const duplicate = room.ok && (seen.has(k) || existing.has(k));
-      if (room.ok) seen.add(k);
-      return { ...row, room: room.ok ? room.room : row.room, problems, duplicate, rankMissing: !row.rank };
-    });
-
-    const render = (fillMember) => {
-      const ok = [], issues = [];
-      for (const r of checked) {
-        const rank = r.rank || (fillMember ? 'MEMBER' : null);
-        const problems = [...r.problems];
-        if (!rank) problems.push(r.rankRaw ? `Membership “${r.rankRaw}” isn’t Diamond, Gold, Silver or Member` : 'No membership');
-        if (r.duplicate) problems.push('Already on the list');
-        (problems.length ? issues : ok).push({ ...r, rank, problems });
-      }
-      return { ok, issues };
-    };
-    const rankOnlyIssues = checked.filter((r) => r.rankMissing && !r.problems.length && !r.duplicate).length;
-
-    const body = (fillMember, mode) => {
-      const { ok, issues } = render(fillMember);
-      return String(html`
-        <div class="summary" style="margin-bottom:14px">
-          <div class="summary-row total"><span>Guests ready to import</span><b>${ok.length}</b></div>
-          ${['DIAMOND', 'GOLD', 'MEMBER'].map((rk) => html`<div class="summary-row"><span>${rankBadge(rk)}</span><b>${ok.filter((g) => g.rank === rk).length}</b></div>`)}
-          ${issues.length ? html`<div class="summary-row warn"><span>Rows that will be skipped</span><b>${issues.length}</b></div>` : ''}
-        </div>
-        ${ignored ? html`<p class="muted small" style="margin:-4px 0 12px">${ignored} line${ignored === 1 ? '' : 's'} without guest details (titles, headings) ${ignored === 1 ? 'was' : 'were'} ignored.</p>` : ''}
-        ${rankOnlyIssues ? html`
-          <label class="check-row"><input type="checkbox" id="fill-member" ${fillMember ? 'checked' : ''}>
-            <span>Set ${rankOnlyIssues} row${rankOnlyIssues === 1 ? '' : 's'} with a blank or other membership to <b>MEMBER</b>${hasRankColumn ? '' : ' (no membership was found in the file)'}</span></label>` : ''}
-        ${guests.length ? html`
-          <div class="import-mode">
-            <label class="check-row"><input type="radio" name="mode" value="add" ${mode === 'add' ? 'checked' : ''}><span>Add to the ${guests.length} guests already on the list</span></label>
-            <label class="check-row"><input type="radio" name="mode" value="replace" ${mode === 'replace' ? 'checked' : ''}><span>Replace the current list</span></label>
-          </div>` : ''}
-        ${issues.length ? html`
-          <details class="issues" ${ok.length === 0 ? 'open' : ''}>
-            <summary>Show the ${issues.length} skipped row${issues.length === 1 ? '' : 's'}</summary>
-            <div class="table-wrap"><table><thead><tr><th>Line</th><th>Name</th><th>Room</th><th>Problem</th></tr></thead><tbody>
-              ${issues.map((r) => html`<tr><td class="muted num">${r.line}</td><td>${r.fullName || '—'}</td><td class="num">${r.room || '—'}</td><td class="small" style="color:var(--danger)">${r.problems.join(' · ')}</td></tr>`)}
-            </tbody></table></div>
-            <p class="muted small" style="margin-top:8px">Fix these in the file and import again, or add them by hand.</p>
-          </details>` : ''}
-      `);
-    };
-
-    let fillMember = !!autoMember;
-    let mode = 'add';
+  // The import window: the three lists at the top, the combined result below.
+  function openImport() {
+    if (importOpen()) { imp.redraw(); return; }
     openModal(String(html`
-      <div class="modal-head"><h2>Import guest list</h2><p>${fileName}${source ? html` · <b>${source}</b>` : ''}</p></div>
+      <div class="modal-head"><h2>Import guest lists</h2>
+        <p class="imp-day">For breakfast on <select class="select select-sm" id="imp-day"></select></p></div>
       <div class="modal-body" id="import-body"></div>
       <div class="modal-foot"><button class="btn btn-outline" data-close>Cancel</button><button class="btn btn-gold" id="do-import">Import guests</button></div>
     `), (m, close) => {
+      imp.modal = m;
+      m.classList.add('modal-wide');
       const bodyEl = m.querySelector('#import-body');
       const importBtn = m.querySelector('#do-import');
-      const redraw = () => {
-        bodyEl.innerHTML = body(fillMember, mode);
-        const count = render(fillMember).ok.length;
-        importBtn.disabled = count === 0;
-        importBtn.textContent = count ? `Import ${count} guest${count === 1 ? '' : 's'}` : 'Nothing to import';
-      };
-      bodyEl.addEventListener('change', (e) => {
-        if (e.target.id === 'fill-member') fillMember = e.target.checked;
-        if (e.target.name === 'mode') mode = e.target.value;
-        redraw();
+      const daySel = m.querySelector('#imp-day');
+
+      const result = () => mergeLists({
+        breakfast: imp.files.breakfast?.data, tier: imp.files.tier?.data, comp: imp.files.comp?.data,
+        existing: imp.mode === 'add' ? guests : [], breakfastDate: imp.day, fillMember: imp.fillMember,
       });
+
+      imp.redraw = () => {
+        const today = todayIso();
+        const days = [...new Set([today, addDays(today, 1), imp.day])].sort();
+        daySel.innerHTML = String(html`${days.map((d) => html`<option value="${d}" ${d === imp.day ? 'selected' : ''}>${d === today ? 'Today' : d === addDays(today, 1) ? 'Tomorrow' : ''} ${fmtDay(d)}</option>`)}`);
+        const r = result();
+        bodyEl.innerHTML = String(importBody(r));
+        const n = r.fresh.length;
+        const changed = r.changed.length;
+        importBtn.disabled = !n && !changed;
+        importBtn.textContent = n ? `Import ${plural(n, 'guest')}${changed ? ` · update ${changed}` : ''}` : changed ? `Update ${plural(changed, 'guest')}` : 'Nothing to import';
+      };
+
+      daySel.addEventListener('change', () => { imp.day = daySel.value; imp.redraw(); });
+      bodyEl.addEventListener('click', (e) => {
+        const add = e.target.closest('[data-add]')?.dataset.add;
+        const remove = e.target.closest('[data-remove-file]')?.dataset.removeFile;
+        const day = e.target.closest('[data-day]')?.dataset.day;
+        if (add) choose(add);
+        if (remove) { delete imp.files[remove]; imp.redraw(); }
+        if (day) { imp.day = day; imp.redraw(); }
+      });
+      bodyEl.addEventListener('change', (e) => {
+        if (e.target.id === 'fill-member') imp.fillMember = e.target.checked;
+        if (e.target.name === 'mode') imp.mode = e.target.value;
+        if (e.target.matches('[data-sheet]')) imp.files.tier.data.pick = Number(e.target.value);
+        imp.redraw();
+      });
+      // Remember which sections are open while the window redraws.
+      bodyEl.addEventListener('toggle', (e) => { if (e.target.dataset.section) imp.open[e.target.dataset.section] = e.target.open; }, true);
+
       m.querySelector('[data-close]').onclick = close;
       importBtn.onclick = () => {
-        const { ok } = render(fillMember);
-        if (mode === 'replace') guests = [];
-        const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
-        for (const g of ok) guests.push({ id: newId(), fullName: g.fullName, room: g.room, rank: g.rank });
+        const r = result();
+        guests = r.entries.map((g) => ({ id: g.id || newId(), fullName: g.fullName, room: g.room, rank: g.rank, pax: g.pax ?? 1 }));
         save();
         resetForm();
         drawList();
         close();
-        toast(`Imported ${ok.length} guest${ok.length === 1 ? '' : 's'} from ${fileName}.`, 'success');
+        const names = Object.values(imp.files).map((f) => f.fileName).join(', ');
+        toast(`Imported ${plural(r.fresh.length, 'guest')}${r.changed.length ? `, updated ${r.changed.length}` : ''} from ${names}.`, 'success');
       };
-      redraw();
+      imp.redraw();
     });
   }
 
-  fileInput.addEventListener('change', () => { handleFile(fileInput.files[0]); fileInput.value = ''; });
-  dropzone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
+  function slotView(list, i, r) {
+    const file = imp.files[list.kind];
+    if (!file) {
+      return html`<button type="button" class="imp-slot empty" data-add="${list.kind}">
+        <span class="slot-n">${i + 1}</span>
+        <span class="slot-text"><b>${list.title}</b><small>${list.empty}</small></span>
+        <span class="slot-plus" aria-hidden="true">${icons.plus}</span></button>`;
+    }
+    const d = file.data;
+    const today = todayIso();
+    const near = (day) => day === today || day === addDays(today, 1);
+    let facts = '';
+    let warn = null;
+    let extra = '';
+    if (list.kind === 'breakfast') {
+      const skipped = r.issues.filter((x) => x.list === 'Breakfast list').length;
+      facts = [d.source, `${plural(d.rows.length - skipped, 'guest')} ready`, skipped ? `${skipped} skipped` : ''].filter(Boolean).join(' · ');
+      if (d.breakfastDate && d.breakfastDate !== imp.day) {
+        warn = { text: `This report is for breakfast on ${fmtDay(d.breakfastDate)}.`, day: near(d.breakfastDate) ? d.breakfastDate : null };
+      }
+    } else if (list.kind === 'tier') {
+      const s = d.sheets[d.pick];
+      const rooms = (t) => new Set(s.rows.filter((x) => x.tier === t).map((x) => x.room)).size;
+      const other = rooms('OTHER');
+      facts = [d.source, `${rooms('DIAMOND')} Diamond · ${rooms('GOLD')} Gold · ${rooms('SILVER')} Silver${other ? ` · ${other} other` : ''}`].filter(Boolean).join(' · ');
+      if (s.date && s.date !== imp.day) warn = { text: `This list is dated ${fmtDay(s.date)}, not the breakfast date.`, day: near(s.date) ? s.date : null };
+      if (d.sheets.length > 1) {
+        extra = html`<label class="sheet-pick">Sheet <select class="select select-sm" data-sheet>
+          ${d.sheets.map((x, k) => html`<option value="${k}" ${k === d.pick ? 'selected' : ''}>${x.name}${x.date ? ` · ${fmtDay(x.date)}` : ''}</option>`)}
+        </select></label>`;
+      }
+    } else {
+      const rooms = new Set(d.rows.map((x) => x.room)).size;
+      facts = [d.source, `${plural(d.rows.length, 'guest')} in ${plural(rooms, 'room')}`].filter(Boolean).join(' · ');
+    }
+    return html`<div class="imp-slot">
+      <span class="slot-n done">${CHECK_SVG}</span>
+      <div class="slot-text">
+        <b>${list.title}</b>
+        <small class="file-name">${file.fileName}</small>
+        <small>${facts}</small>
+        ${extra}
+        ${warn ? html`<div class="slot-warn">${warn.text}${warn.day ? html` <button type="button" class="link-btn small" data-day="${warn.day}">Use ${fmtDay(warn.day)}</button>` : ''}</div>` : ''}
+      </div>
+      <span class="slot-actions">
+        <button type="button" class="btn btn-ghost btn-sm" data-add="${list.kind}">Change</button>
+        <button type="button" class="btn btn-ghost btn-sm slot-x" data-remove-file="${list.kind}" title="Remove this file" aria-label="Remove ${list.title}">✕</button>
+      </span>
+    </div>`;
+  }
 
-  // Dropping a file anywhere on this page works, not only on the box.
+  function importBody(r) {
+    const f = imp.files;
+    const s = r.stats;
+    const ranks = (rk) => r.fresh.filter((g) => g.rank === rk).length;
+    const happened = [];
+    if (f.tier) {
+      if (s.upgraded) happened.push(html`<li><b>${plural(s.upgraded, 'guest')}</b> on the breakfast list ${s.upgraded === 1 ? 'is' : 'are'} Diamond or Gold</li>`);
+      if (s.tierAdded) happened.push(html`<li><b>${plural(s.tierAdded, 'Diamond/Gold room')}</b> not on the breakfast list ${s.tierAdded === 1 ? 'is' : 'are'} added — one entry per room</li>`);
+      if (s.noBreakfast) happened.push(html`<li class="muted"><b>${plural(s.noBreakfast, 'Silver/other room')}</b> not on the breakfast list — no breakfast</li>`);
+      if (s.nameDiffers) happened.push(html`<li class="warn"><b>${plural(s.nameDiffers, 'room')}</b> with a different name on the two lists — check the details</li>`);
+    }
+    if (f.comp) {
+      if (s.compAdded || s.compOnList) happened.push(html`<li><b>${plural(s.compAdded, 'complimentary guest')}</b> added${s.compOnList ? html` · ${s.compOnList} already on the list` : ''}</li>`);
+      if (s.compLater) happened.push(html`<li class="muted"><b>${plural(s.compLater, 'complimentary guest')}</b> not for this breakfast (arriving later or already left)</li>`);
+    }
+    if (r.changed.length) happened.push(html`<li><b>${plural(r.changed.length, 'guest')}</b> already on your list will be updated (tier or people)</li>`);
+    const hasFiles = Object.keys(f).length > 0;
+    return html`
+      <div class="imp-slots">${LISTS.map((list, i) => slotView(list, i, r))}</div>
+      ${hasFiles ? html`
+        <div class="summary" style="margin-top:16px">
+          <div class="summary-row total"><span>Guests ready to import</span><b>${r.fresh.length}</b></div>
+          ${RANKS.map((rk) => html`<div class="summary-row"><span>${rankBadge(rk)}</span><b>${ranks(rk)}</b></div>`)}
+          <div class="summary-row"><span>${PEOPLE_SVG} People expected${imp.mode === 'add' && guests.length ? ' (whole list)' : ''}</span><b>${r.people}</b></div>
+          ${r.issues.length ? html`<div class="summary-row warn"><span>Rows that will be skipped</span><b>${r.issues.length}</b></div>` : ''}
+        </div>
+        ${happened.length ? html`<ul class="imp-happened">${happened}</ul>` : ''}
+        ${r.rankOnly ? html`
+          <label class="check-row" style="margin-top:12px"><input type="checkbox" id="fill-member" ${imp.fillMember ? 'checked' : ''}>
+            <span>Set ${plural(r.rankOnly, 'row')} with a blank or other membership to <b>MEMBER</b></span></label>` : ''}
+        ${guests.length ? html`
+          <div class="import-mode">
+            <label class="check-row"><input type="radio" name="mode" value="add" ${imp.mode === 'add' ? 'checked' : ''}><span>Add to the ${plural(guests.length, 'guest')} already on the list</span></label>
+            <label class="check-row"><input type="radio" name="mode" value="replace" ${imp.mode === 'replace' ? 'checked' : ''}><span>Replace the current list</span></label>
+          </div>` : ''}
+        ${r.details.length ? html`
+          <details class="imp-details" data-section="details" ${imp.open.details ? 'open' : ''}>
+            <summary>Show the tier and complimentary lists room by room</summary>
+            <div class="table-wrap"><table><thead><tr><th>Room</th><th>Guest</th><th>List</th><th>People</th><th>Result</th></tr></thead><tbody>
+              ${r.details.map((d) => html`<tr class="tone-${d.tone}">
+                <td class="num">${d.room || '—'}</td><td>${d.name || '—'}</td>
+                <td class="small">${d.list === 'Complimentary' ? 'Complimentary' : ''}${d.label ? html`${d.list === 'Complimentary' ? ' · ' : ''}${d.label}` : ''}</td>
+                <td class="num">${d.pax || ''}</td><td class="small">${d.result}</td></tr>`)}
+            </tbody></table></div>
+          </details>` : ''}
+        ${r.issues.length ? html`
+          <details class="issues" data-section="issues" ${imp.open.issues || r.fresh.length === 0 ? 'open' : ''}>
+            <summary>Show the ${plural(r.issues.length, 'skipped row')}</summary>
+            <div class="table-wrap"><table><thead><tr><th>List</th><th>Line</th><th>Name</th><th>Room</th><th>Problem</th></tr></thead><tbody>
+              ${r.issues.map((x) => html`<tr><td class="small">${x.list}</td><td class="muted num">${x.line}</td><td>${x.name || '—'}</td><td class="num">${x.room || '—'}</td><td class="small" style="color:var(--danger)">${x.problem}</td></tr>`)}
+            </tbody></table></div>
+            <p class="muted small" style="margin-top:8px">Fix these in the file and import again, or add them by hand.</p>
+          </details>` : ''}
+      ` : html`<p class="muted small" style="margin-top:14px">Add at least one list to see the guests.</p>`}
+    `;
+  }
+
+  // Dropping files anywhere on this page works, not only on the box.
   let dragDepth = 0;
   const onDragEnter = (e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); dragDepth++; dropzone.classList.add('dragging'); } };
   const onDragOver = (e) => { if (e.dataTransfer?.types?.includes('Files')) e.preventDefault(); };
@@ -407,7 +574,7 @@ export async function renderPrepare() {
     e.preventDefault();
     dragDepth = 0;
     dropzone.classList.remove('dragging');
-    handleFile(e.dataTransfer.files[0]);
+    handleFiles([...e.dataTransfer.files], null);
   };
   window.addEventListener('dragenter', onDragEnter);
   window.addEventListener('dragover', onDragOver);
@@ -444,6 +611,12 @@ export async function renderActiveShift() {
   const shiftId = data.shift.id;
   let query = '';
   let filter = 'waiting';
+  // How many people are expected from each room (worked out again whenever the data changes).
+  let peopleCache = { of: null, map: new Map() };
+  const roomPeople = (room) => {
+    if (peopleCache.of !== data) peopleCache = { of: data, map: peopleByRoom(data.guests) };
+    return peopleCache.map.get(room) || 1;
+  };
   let seenRecent = new Set(data.recent.map((r) => r.id));
   let flashId = null;
   let finishing = false;
@@ -530,7 +703,7 @@ export async function renderActiveShift() {
     const pct = s.expected ? Math.round((s.checkedIn / s.expected) * 100) : 0;
     el.querySelector('#stats').innerHTML = String(html`
       <div class="stat navy"><div class="label">Expected</div><div class="value">${s.expected}</div>
-        <div class="progress"><i style="width:${pct}%"></i></div><div class="sub">${pct}% arrived</div></div>
+        <div class="progress"><i style="width:${pct}%"></i></div><div class="sub">${s.expectedPeople && s.expectedPeople !== s.expected ? `${s.expectedPeople} people · ` : ''}${pct}% arrived</div></div>
       <div class="stat s-arrived"><div class="label">Checked in</div><div class="value">${s.checkedIn}</div><div class="sub">${s.totalArrivals} arrivals incl. unknown</div></div>
       <div class="stat s-remaining"><div class="label">Remaining</div><div class="value">${s.remaining}</div><div class="sub">not arrived yet</div></div>
       <div class="stat s-diamond"><div class="label">Diamond</div><div class="value">${s.diamond}</div><div class="sub">arrivals</div></div>
@@ -572,6 +745,7 @@ export async function renderActiveShift() {
           <div class="guest-name">${g.fullName}</div>
           <div class="guest-meta">
             ${rankBadge(g.rank)}
+            ${paxChip(roomPeople(g.room), true)}
             <span class="status ${g.arrival ? 'arrived' : 'waiting'}">${g.arrival ? 'Arrived' : 'Not arrived'}</span>
           </div>
         </div>
@@ -652,12 +826,28 @@ export async function renderActiveShift() {
 
   // ---------- actions ----------
   function showAlreadyArrived(name, room, arrivedAt, by) {
+    const people = roomPeople(room);
+    if (people > 1) {
+      // A room for several people: the first one is registered, the others simply go in.
+      const waiting = data.guests.filter((x) => x.room === room && !x.arrival);
+      buzz(35);
+      play(currentTheme(), 'note');
+      openModal(String(html`
+        <div class="modal-head room-alert"><span class="room-tag">Room ${room} · already registered</span>
+          <h2 style="margin-top:10px">Expecting ${people} people</h2>
+          <p><b>${name}</b> was checked in at <b>${fmtTime(arrivedAt)}</b> by ${by}.
+            This room is registered for <b>${people} people</b>, so the others from the room can go in — no need to check them in again.</p>
+          ${waiting.length ? html`<p class="small">Also on the list for this room: ${waiting.map((x) => x.fullName).join(', ')}.</p>` : ''}</div>
+        <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>`),
+        (m, close) => { m.querySelector('[data-close]').onclick = close; });
+      return;
+    }
     buzz([80, 60, 80]);
     play(currentTheme(), 'warn');
     openModal(String(html`
       <div class="modal-head dup-alert"><span class="dup-tag">Duplicate prevented</span>
         <h2 style="margin-top:10px">Already arrived</h2>
-        <p><b>${name}</b> (room ${room}) was already checked in at <b>${fmtTime(arrivedAt)}</b> by ${by}.</p></div>
+        <p><b>${name}</b> (room ${room}) was already checked in at <b>${fmtTime(arrivedAt)}</b> by ${by}. This room is registered for 1 person.</p></div>
       <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>`),
       (m, close) => { m.querySelector('[data-close]').onclick = close; });
   }
@@ -718,7 +908,12 @@ export async function renderActiveShift() {
             <div class="field"><label for="ag-first">First name</label><input class="input" id="ag-first" name="first" maxlength="50" value="${prefill.first || ''}" autofocus></div>
             <div class="field"><label for="ag-last">Last name</label><input class="input" id="ag-last" name="last" maxlength="50" value="${prefill.last || ''}"></div>
           </div>
-          <div class="field"><label for="ag-room">Room number</label><input class="input room-input" id="ag-room" name="room" inputmode="numeric" maxlength="4" value="${prefill.room || ''}"><span class="hint" id="ag-hint"></span></div>
+          <div class="room-row">
+            <div class="field"><label for="ag-room">Room number</label><input class="input room-input" id="ag-room" name="room" inputmode="numeric" maxlength="4" value="${prefill.room || ''}"><span class="hint" id="ag-hint"></span></div>
+            <div class="field"><label for="ag-people">People</label>
+              <select class="select people-select" id="ag-people" name="people">${PEOPLE_CHOICES.map((n) => html`<option value="${n}">${n}</option>`)}</select>
+              <span class="hint">in room</span></div>
+          </div>
           <div class="field"><label for="ag-rank">Membership</label>
             <select class="select" id="ag-rank" name="rank"><option value="">Select membership…</option>${RANKS.map((r) => html`<option value="${r}">${r}</option>`)}</select>
             <span class="hint">Silver guests count as Member.</span></div>
@@ -732,11 +927,19 @@ export async function renderActiveShift() {
       m.querySelector('[data-close]').onclick = close;
       const roomField = m.querySelector('[name=room]');
       const hint = m.querySelector('#ag-hint');
+      const peopleField = m.querySelector('[name=people]');
+      let peopleTouched = false;
+      peopleField.addEventListener('change', () => { peopleTouched = true; });
       const showHint = () => {
         roomField.value = roomField.value.replace(/\D/g, '');
         const r = parseRoom(roomField.value);
         hint.className = 'hint ' + (r.ok ? 'ok' : roomField.value.length >= 3 ? 'err' : '');
         hint.textContent = r.ok ? `✓ Floor ${r.floor}` : roomField.value.length >= 3 ? r.error : '';
+        // A room that is already on the list starts with its current number of people.
+        if (r.ok && !peopleTouched) {
+          const n = data.guests.some((x) => x.room === r.room) ? Math.min(10, roomPeople(r.room)) : 1;
+          peopleField.value = String(n);
+        }
       };
       roomField.addEventListener('input', showHint);
       showHint();
@@ -760,7 +963,8 @@ export async function renderActiveShift() {
         const alsoCheckIn = e.submitter?.value === 'checkin';
         m.querySelectorAll('button').forEach((b) => (b.disabled = true));
         try {
-          const res = await api('POST', `/api/shifts/${shiftId}/guests`, { fullName: `${first} ${last}`, room: r.room, rank: f.rank });
+          const pax = paxForRoom(data.guests, r.room, Number(f.people) || 1);
+          const res = await api('POST', `/api/shifts/${shiftId}/guests`, { fullName: `${first} ${last}`, room: r.room, rank: f.rank, pax });
           data = res;
           if (alsoCheckIn) data = await api('POST', `/api/shifts/${shiftId}/checkin`, { guestId: res.addedGuestId });
           close();

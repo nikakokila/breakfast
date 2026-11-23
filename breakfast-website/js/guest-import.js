@@ -1,18 +1,20 @@
-// Reads a guest list from a TXT, PDF, CSV or Excel (.xlsx) file, directly in the browser.
-// Opera "Package Guest Details" (PKGGSTDTL) Excel reports are recognised automatically.
-// The file never leaves the computer; only the final guest list is saved when the shift starts.
+// Reads the guest lists used to prepare a breakfast shift, directly in the browser.
+// The files never leave the device; only the final guest list is saved when the shift starts.
 //
-// Each line (or each row of a PDF table) is one guest. On every line we look for:
-//   - a room number   (3–4 digits, e.g. 512 or 1208)
-//   - a membership    (Diamond, Gold, Silver or Member — Silver counts as Member)
-//   - the guest name  (the remaining words, in the order they are written)
-// So "Maria Rossi 512 Gold", "512 | Rossi, Maria | GOLD" and "Gold  Maria Rossi  Room 512" all work.
+// Three kinds of list are understood:
+//   1. Breakfast list  — who is expected at breakfast: the Opera "Package Guest Details" report (PKGGSTDTL),
+//                        or any TXT / PDF / CSV list with one guest per line (name · room · membership).
+//   2. Tier list       — the reception's Diamond / Gold / Silver "Breakfast report" (Room N, Guest Name, PAX, Tier).
+//   3. Complimentary   — the Opera "Guest Request/Comment" report of guests given free breakfast.
+// Excel files may be .xlsx or the older .xls that Opera exports. Each file is recognised by its headings,
+// so it does not matter which upload box it was dropped on.
 
 import { parseRoom } from './rooms.js';
+import { readSpreadsheet, isSpreadsheetName } from './sheets.js';
 
 // ---------- Reading files ----------
 
-function decodeText(buffer) {
+export function decodeText(buffer) {
   const bytes = new Uint8Array(buffer);
   if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
   if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
@@ -78,151 +80,111 @@ async function readPdfLines(buffer) {
   return lines;
 }
 
-// ---------- Excel (.xlsx) ----------
-// An .xlsx file is a ZIP archive of XML files. We read it with the browser's own tools:
-// DecompressionStream for the ZIP and DOMParser for the XML. No extra library is needed.
-
-async function unzip(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
-  let eocd = -1;
-  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
-    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
-  }
-  if (eocd < 0) throw new Error('This Excel file could not be opened. It may be damaged.');
-  const count = view.getUint16(eocd + 10, true);
-  let p = view.getUint32(eocd + 16, true);
-  const files = new Map();
-  const dec = new TextDecoder();
-  for (let n = 0; n < count && view.getUint32(p, true) === 0x02014b50; n++) {
-    const method = view.getUint16(p + 10, true);
-    const size = view.getUint32(p + 20, true);
-    const nameLen = view.getUint16(p + 28, true);
-    const extraLen = view.getUint16(p + 30, true);
-    const commentLen = view.getUint16(p + 32, true);
-    const local = view.getUint32(p + 42, true);
-    const name = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
-    files.set(name, { method, size, local });
-    p += 46 + nameLen + extraLen + commentLen;
-  }
-  const read = async (name) => {
-    const f = files.get(name);
-    if (!f) return null;
-    const start = f.local + 30 + view.getUint16(f.local + 26, true) + view.getUint16(f.local + 28, true);
-    const data = bytes.subarray(start, start + f.size);
-    if (f.method === 0) return dec.decode(data);
-    if (f.method !== 8 || typeof DecompressionStream === 'undefined') throw new Error('This Excel file uses a format this device can’t read. Save it as PDF or TXT instead.');
-    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-    return new Response(stream).text();
-  };
-  return { names: [...files.keys()], read };
-}
-
-const colIndex = (ref) => {
-  const letters = /^[A-Z]+/.exec(ref || '')?.[0] || 'A';
-  let n = 0;
-  for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-  return n - 1;
-};
-
-// Returns the first worksheet as rows of cells: [{ cells: ['', 'ROOM', …], where: '21' }].
-async function readXlsxRows(buffer) {
-  const zip = await unzip(buffer);
-  const xml = (text) => new DOMParser().parseFromString(text, 'application/xml');
-  const sheetName = zip.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))
-    .sort((a, b) => Number(/(\d+)\.xml$/.exec(a)[1]) - Number(/(\d+)\.xml$/.exec(b)[1]))[0];
-  if (!sheetName) throw new Error('No worksheet was found in this Excel file.');
-  const shared = [];
-  const sst = await zip.read('xl/sharedStrings.xml');
-  if (sst) for (const si of xml(sst).getElementsByTagName('si')) shared.push([...si.getElementsByTagName('t')].map((t) => t.textContent).join(''));
-  const doc = xml(await zip.read(sheetName));
+// CSV with commas, semicolons or tabs, and "quoted, values".
+function parseCsv(text) {
+  const first = text.split(/\r\n|\r|\n/).slice(0, 5).join('\n');
+  const sep = [',', ';', '\t'].map((s) => [s, first.split(s).length]).sort((a, b) => b[1] - a[1])[0][0];
   const rows = [];
-  for (const row of doc.getElementsByTagName('row')) {
-    const cells = [];
-    for (const c of row.getElementsByTagName('c')) {
-      const type = c.getAttribute('t');
-      const v = c.getElementsByTagName('v')[0]?.textContent ?? '';
-      let value = v;
-      if (type === 's') value = shared[Number(v)] ?? '';
-      else if (type === 'inlineStr') value = [...c.getElementsByTagName('t')].map((t) => t.textContent).join('');
-      cells[colIndex(c.getAttribute('r'))] = String(value).trim();
-    }
-    rows.push({ cells: Array.from(cells, (x) => x ?? ''), where: row.getAttribute('r') || String(rows.length + 1) });
+  let cells = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"' && cell === '') quoted = true;
+    else if (ch === sep) { cells.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      cells.push(cell); rows.push(cells); cells = []; cell = '';
+    } else cell += ch;
   }
-  return rows;
+  if (cell || cells.length) { cells.push(cell); rows.push(cells); }
+  return rows.map((c, i) => ({ cells: c.map((x) => x.trim()), where: String(i + 1) }));
 }
 
-// "HU / WANG" → "Wang Hu", "Alsaed / NEDAL" → "Nedal Alsaed". Capitals become normal case.
-function operaName(raw) {
-  const tidy = (s) => s.trim().replace(/\s+/g, ' ').toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
-  const [last, first] = String(raw).split('/');
-  return (first ? `${tidy(first)} ${tidy(last)}` : tidy(last)).slice(0, 100);
-}
+const linesFromRows = (rows) => rows.map((r) => ({ text: r.cells.filter(Boolean).join('\t'), where: r.where }));
 
-// Opera guest statuses. Guests in the hotel (or leaving today) are expected at breakfast.
-const OPERA_STATUS = {
-  AR: null, DP: null, PND: null, RG: null, CKIN: null, DUEOUT: null, CKOUT: null,
-  NA: 'Not arrived', SNS: 'Share no-show', CS: 'Cancelled share', SX: 'Cancelled', CXL: 'Cancelled', NS: 'No-show', NOSHOW: 'No-show',
-};
-
-// Recognises an Opera report by its heading row (ROOM, NAME and GUEST STATUS or ADULTS/CHILDREN).
-function readOperaReport(rows) {
-  const at = rows.findIndex((r) => {
-    const h = r.cells.map((c) => c.toUpperCase());
-    return h.includes('ROOM') && h.includes('NAME') && (h.includes('GUEST STATUS') || h.some((c) => c.startsWith('ADULTS')));
-  });
-  if (at < 0) return null;
-  const head = rows[at].cells.map((c) => c.toUpperCase());
-  const col = (test) => head.findIndex(test);
-  const cRoom = col((c) => c === 'ROOM');
-  const cName = col((c) => c === 'NAME');
-  const cStatus = col((c) => c === 'GUEST STATUS' || c === 'STATUS');
-  const cRank = col((c) => /MEMBER|TIER|HONORS|HHONORS|VIP/.test(c));
-  const out = [];
-  let ignored = at + 1;
-  for (const r of rows.slice(at + 1)) {
-    const name = (r.cells[cName] || '').trim();
-    const roomCell = (r.cells[cRoom] || '').trim();
-    // Package headings and TOTAL lines sit in the room column and have no guest name.
-    if (!name) { ignored++; continue; }
-    const status = cStatus >= 0 ? (r.cells[cStatus] || '').trim().toUpperCase() : '';
-    const rankRaw = cRank >= 0 ? (r.cells[cRank] || '').trim() : '';
-    const row = { line: r.where, fullName: operaName(name), room: /^\d+$/.test(roomCell) ? roomCell : '', rankRaw, rank: rankRaw ? mapRank(rankRaw) : null };
-    if (status && OPERA_STATUS[status]) row.skipReason = `${OPERA_STATUS[status]} (${status})`;
-    out.push(row);
-  }
-  if (!out.length) throw new Error('This Opera report has no guests in it.');
-  return { rows: out, ignored, hasRankColumn: cRank >= 0, autoMember: cRank < 0, source: 'Opera guest report' };
-}
-
-// Returns [{ text, where }], where "where" is the line number shown in the preview.
-// Opera reports come back already understood, as lines.prepared.
-export async function readGuestFile(file) {
+// Opens any supported file. Returns { sheets: [{ name, rows }], active, lines } —
+// "sheets" for lists with columns (Excel, CSV), "lines" for the one-guest-per-line reader.
+export async function readImportFile(file) {
   const name = file.name.toLowerCase();
   if (file.size > 20 * 1024 * 1024) throw new Error('This file is too large (over 20 MB).');
+  if (/\.docx?$/.test(name)) throw new Error('Please use an Excel, PDF or TXT file. In Word: File → Save As → choose “PDF”.');
   const buffer = await file.arrayBuffer();
-  if (name.endsWith('.pdf') || file.type === 'application/pdf') return readPdfLines(buffer);
-  if (name.endsWith('.txt') || name.endsWith('.csv') || file.type.startsWith('text/')) {
-    return decodeText(buffer).split(/\r\n|\r|\n/).map((text, i) => ({ text, where: String(i + 1) }));
+  if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+    const lines = await readPdfLines(buffer);
+    return { sheets: [{ name: 'PDF', rows: lines.map((l) => ({ cells: l.text.split('\t').map((s) => s.trim()), where: l.where })) }], active: 0, lines };
   }
-  if (name.endsWith('.xlsx') || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-    const rows = await readXlsxRows(buffer);
-    const lines = rows.map((r) => ({ text: r.cells.filter(Boolean).join('\t'), where: r.where }));
-    lines.prepared = readOperaReport(rows);
-    return lines;
+  if (isSpreadsheetName(name) || /spreadsheet|ms-excel/.test(file.type)) {
+    const book = await readSpreadsheet(buffer, decodeText);
+    const main = book.sheets[book.active]?.rows.length ? book.sheets[book.active] : book.sheets.find((s) => s.rows.length) || book.sheets[0];
+    return { ...book, lines: linesFromRows(main?.rows || []) };
   }
-  if (/\.xls$/.test(name)) {
-    throw new Error('This is an old Excel file (.xls). Open it in Excel and choose File → Save As → “Excel Workbook (.xlsx)”, then import that.');
+  if (name.endsWith('.txt') || name.endsWith('.csv') || file.type.startsWith('text/') || !file.type) {
+    const text = decodeText(buffer);
+    const lines = text.split(/\r\n|\r|\n/).map((t, i) => ({ text: t, where: String(i + 1) }));
+    const rows = name.endsWith('.csv') ? parseCsv(text) : lines.map((l) => ({ cells: l.text.split('\t').map((s) => s.trim()), where: l.where }));
+    return { sheets: [{ name: 'Text', rows }], active: 0, lines };
   }
-  if (/\.docx?$/.test(name)) {
-    throw new Error('Please use a TXT, PDF or Excel file. In Word: File → Save As → choose “PDF”.');
-  }
-  throw new Error('Please drop a TXT, PDF or Excel (.xlsx) file.');
+  throw new Error('Please use an Excel (.xlsx or .xls), PDF or TXT file.');
 }
 
-// ---------- Understanding each line ----------
+// ---------- Dates ----------
+// Dates are passed around as "YYYY-MM-DD" text, in the hotel's own time.
+
+const pad = (n) => String(n).padStart(2, '0');
+const iso = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
+export const todayIso = () => { const d = new Date(); return iso(d.getFullYear(), d.getMonth() + 1, d.getDate()); };
+export function addDays(day, n) {
+  const [y, m, d] = day.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return iso(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+}
+const dayNumber = (day) => { const [y, m, d] = day.split('-').map(Number); return Date.UTC(y, m - 1, d) / 86400000; };
+export const daysBetween = (a, b) => dayNumber(b) - dayNumber(a);
+export const fmtDay = (day, opts = { weekday: 'short', day: 'numeric', month: 'short' }) => {
+  if (!day) return '';
+  const [y, m, d] = day.split('-').map(Number);
+  return new Intl.DateTimeFormat('en-GB', opts).format(new Date(y, m - 1, d));
+};
+
+const validDay = (y, m, d) => m >= 1 && m <= 12 && d >= 1 && d <= 31 && new Date(y, m - 1, d).getDate() === d;
+
+// Understands 23.11.2026, 23.11.26, 11/23/26, 23/11/2026, 2026-11-23 and Excel's day numbers (46349).
+// For "a/b/yy", whichever of day/month or month/day is possible (and closest to today) wins.
+export function parseDay(value, near = todayIso()) {
+  const s = String(value ?? '').trim();
+  if (/^\d{5}(\.\d+)?$/.test(s) && Number(s) > 30000 && Number(s) < 80000) {
+    const t = new Date(Date.UTC(1899, 11, 30) + Math.floor(Number(s)) * 86400000);
+    return iso(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+  }
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) return validDay(+m[1], +m[2], +m[3]) ? iso(+m[1], +m[2], +m[3]) : null;
+  m = /^(\d{1,2})([./-])(\d{1,2})\2(\d{2}|\d{4})$/.exec(s);
+  if (!m) return null;
+  const year = m[4].length === 2 ? 2000 + Number(m[4]) : Number(m[4]);
+  const a = Number(m[1]);
+  const b = Number(m[3]);
+  const dayFirst = validDay(year, b, a) ? iso(year, b, a) : null;
+  const monthFirst = validDay(year, a, b) ? iso(year, a, b) : null;
+  if (m[2] === '.') return dayFirst; // dots are always day.month
+  if (!dayFirst || !monthFirst) return dayFirst || monthFirst;
+  return Math.abs(daysBetween(near, dayFirst)) <= Math.abs(daysBetween(near, monthFirst)) ? dayFirst : monthFirst;
+}
+
+// ---------- Names and memberships ----------
 
 const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const titleCase = (s) => s.trim().replace(/\s+/g, ' ').toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+
+// "HU / WANG" → "Wang Hu", "MOSINYAN/ALINA" → "Alina Mosinyan". Capitals become normal case.
+function operaName(raw) {
+  const [last, first] = String(raw).split('/');
+  return (first && first.trim() ? `${titleCase(first)} ${titleCase(last)}` : titleCase(last)).slice(0, 100);
+}
 
 export function mapRank(word) {
   const w = norm(word).replace(/[^a-z]/g, '');
@@ -233,6 +195,230 @@ export function mapRank(word) {
   if (w === 'member' || w === 'members' || w === 'mbr') return 'MEMBER';
   return null;
 }
+
+// Tier codes on the reception's list: D, G, S, DR (Diamond Reserve), "booking", …
+export function tierOf(raw) {
+  const w = norm(raw).replace(/[^a-z]/g, '');
+  if (!w) return null;
+  if (w === 'd' || w === 'dr' || w === 'ld' || w.startsWith('diamond') || w.startsWith('lifetimediamond')) return 'DIAMOND';
+  if (w === 'g' || w.startsWith('gold')) return 'GOLD';
+  if (w === 's' || w.startsWith('silver')) return 'SILVER';
+  return 'OTHER';
+}
+const TIER_LABEL = { DIAMOND: 'Diamond', GOLD: 'Gold', SILVER: 'Silver' };
+export const tierLabel = (tier, raw) => {
+  if (/reserve/i.test(raw || '') || /^dr$/i.test((raw || '').trim())) return 'Diamond Reserve';
+  return TIER_LABEL[tier] || titleCase(String(raw || 'No tier'));
+};
+
+const headerIndex = (cells) => cells.map((c) => String(c).toUpperCase().replace(/\s+/g, ' ').trim());
+const peopleCount = (s) => {
+  const nums = String(s ?? '').match(/\d+/g);
+  return nums ? nums.reduce((a, n) => a + Number(n), 0) : null;
+};
+
+// ---------- 1. Opera "Package Guest Details" report ----------
+
+// Opera guest statuses. Guests in the hotel (or leaving today) are expected at breakfast.
+const OPERA_STATUS = {
+  AR: null, DP: null, PND: null, RG: null, CKIN: null, DUEOUT: null, CKOUT: null,
+  NA: 'Not arrived', SNS: 'Share no-show', CS: 'Cancelled share', SX: 'Cancelled', CXL: 'Cancelled', NS: 'No-show', NOSHOW: 'No-show',
+};
+
+// Recognised by its heading row (ROOM, NAME and GUEST STATUS or ADULTS/CHILDREN).
+export function readOperaPackage(rows) {
+  const at = rows.findIndex((r) => {
+    const h = headerIndex(r.cells);
+    return h.includes('ROOM') && h.includes('NAME') && (h.includes('GUEST STATUS') || h.some((c) => c.startsWith('ADULTS')));
+  });
+  if (at < 0) return null;
+  const head = headerIndex(rows[at].cells);
+  const col = (test) => head.findIndex(test);
+  const cRoom = col((c) => c === 'ROOM');
+  const cName = col((c) => c === 'NAME');
+  const cStatus = col((c) => c === 'GUEST STATUS' || c === 'STATUS');
+  const cPeople = col((c) => c.startsWith('ADULTS'));
+  const cRank = col((c) => /MEMBER|TIER|HONORS|HHONORS|VIP/.test(c));
+  const out = [];
+  let ignored = at + 1;
+  for (const r of rows.slice(at + 1)) {
+    const name = (r.cells[cName] || '').trim();
+    const roomCell = (r.cells[cRoom] || '').trim();
+    // Package headings and TOTAL lines sit in the room column and have no guest name.
+    if (!name) { ignored++; continue; }
+    const status = cStatus >= 0 ? (r.cells[cStatus] || '').trim().toUpperCase() : '';
+    const rankRaw = cRank >= 0 ? (r.cells[cRank] || '').trim() : '';
+    const pax = cPeople >= 0 ? peopleCount(r.cells[cPeople]) : null; // "2/1" = 2 adults and 1 child
+    const row = { line: r.where, fullName: operaName(name), room: /^\d+$/.test(roomCell) ? roomCell : '', rankRaw, rank: rankRaw ? mapRank(rankRaw) : null, pax: pax ?? 1 };
+    if (status && OPERA_STATUS[status]) row.skipReason = `${OPERA_STATUS[status]} (${status})`;
+    out.push(row);
+  }
+  if (!out.length) throw new Error('This Opera report has no guests in it.');
+  // "PACKAGE GUEST DETAILS 11/22/26-11/22/26" is one night, so breakfast is the morning after.
+  let breakfastDate = null;
+  for (const r of rows.slice(0, at)) {
+    const m = r.cells.join(' ').match(/PACKAGE GUEST DETAILS\s+(\S+)\s*-\s*(\S+)/i);
+    if (m) {
+      const from = parseDay(m[1]);
+      const to = parseDay(m[2]);
+      if (from && from === to) breakfastDate = addDays(from, 1);
+    }
+  }
+  return { rows: out, ignored, hasRankColumn: cRank >= 0, autoMember: cRank < 0, source: 'Opera package report', breakfastDate };
+}
+
+// ---------- 2. Diamond / Gold / Silver list ----------
+
+// Finds the table with Room, Guest Name, PAX and Tier columns on one sheet.
+function readTierSheet(rows) {
+  const at = rows.findIndex((r) => {
+    const h = headerIndex(r.cells);
+    // Room, name, tier AND a people (PAX) column: a breakfast list with a membership column is not a tier list.
+    return h.some((c) => /^(ROOM|RM)\b/.test(c)) && h.some((c) => /\bTIER\b|^LEVEL$|^STATUS$/.test(c)) && h.some((c) => /NAME/.test(c))
+      && h.some((c) => /^(PAX|PERSONS?|PEOPLE|GUESTS?|ADULTS?|#\s*GSTS?|NO\.? OF GUESTS)$/.test(c));
+  });
+  if (at < 0) return null;
+  const head = headerIndex(rows[at].cells);
+  const col = (test) => head.findIndex(test);
+  const cRoom = col((c) => /^(ROOM|RM)\b/.test(c));
+  const cName = col((c) => /NAME/.test(c));
+  const cTier = col((c) => /\bTIER\b/.test(c)) >= 0 ? col((c) => /\bTIER\b/.test(c)) : col((c) => /^LEVEL$|^STATUS$/.test(c));
+  const cPax = col((c) => /^(PAX|PERSONS?|PEOPLE|GUESTS?|ADULTS?|#\s*GSTS?|NO\.? OF GUESTS)$/.test(c));
+  const cStay = col((c) => /STAY|DATES?$|ARRIVAL/.test(c));
+  // The "Date:" at the top of the report.
+  let date = null;
+  for (const r of rows.slice(0, at)) {
+    r.cells.forEach((c, i) => {
+      if (date) return;
+      const inline = /^date\s*:?\s*(.+)$/i.exec(c);
+      if (inline && parseDay(inline[1])) date = parseDay(inline[1]);
+      else if (/^date\s*:?$/i.test(c)) {
+        const next = r.cells.slice(i + 1).find((x) => x);
+        if (next) date = parseDay(next);
+      }
+    });
+  }
+  const out = [];
+  let ignored = at + 1;
+  for (const r of rows.slice(at + 1)) {
+    const roomCell = (r.cells[cRoom] || '').trim();
+    const name = (r.cells[cName] || '').trim();
+    if (!roomCell && !name) { ignored++; continue; }
+    if (!/^\d{3,4}$/.test(roomCell) && !name) { ignored++; continue; } // totals and notes
+    const tierRaw = cTier >= 0 ? (r.cells[cTier] || '').trim() : '';
+    const pax = cPax >= 0 ? peopleCount(r.cells[cPax]) : null;
+    out.push({
+      line: r.where, room: roomCell, fullName: titleCase(name).slice(0, 100), tierRaw, tier: tierOf(tierRaw) || 'OTHER',
+      pax: Math.min(20, Math.max(1, pax ?? 1)), stay: cStay >= 0 ? (r.cells[cStay] || '').trim() : '',
+    });
+  }
+  return { rows: out, ignored, date };
+}
+
+// All sheets that hold a tier table. The one open when the file was saved is chosen first.
+export function readTierBook(book) {
+  const sheets = [];
+  book.sheets.forEach((s, index) => {
+    const t = readTierSheet(s.rows);
+    if (t && t.rows.length) sheets.push({ index, name: s.name, ...t });
+  });
+  if (!sheets.length) return null;
+  const open = sheets.findIndex((s) => s.index === book.active);
+  return { sheets, pick: open >= 0 ? open : sheets.length - 1, source: 'Diamond · Gold · Silver list' };
+}
+
+// ---------- 3. Opera "Guest Request/Comment" report (complimentary breakfast) ----------
+
+// "MOSINYAN/ALINA 3130021854  BLUE" → name "Alina Mosinyan", tier "BLUE".
+function requestName(cell) {
+  let s = String(cell).replace(/\s+/g, ' ').trim();
+  let tierRaw = '';
+  const t = /\s(LIFETIME DIAMOND|DIAMOND RESERVE|DIAMOND|GOLD|SILVER|BLUE|MEMBER)$/i.exec(s);
+  if (t) { tierRaw = t[1]; s = s.slice(0, t.index).trim(); }
+  const conf = /\s\d{6,}(\s.*)?$/.exec(s); // the confirmation number and anything after it
+  if (conf) s = s.slice(0, conf.index).trim();
+  return { fullName: operaName(s), tierRaw };
+}
+
+export function readRequestReport(rows) {
+  const at = rows.findIndex((r) => {
+    const h = headerIndex(r.cells);
+    return h.includes('GUEST NAME') && h.some((c) => /^RM\s*#|^ROOM/.test(c)) && h.some((c) => /#\s*GSTS|REQUEST|ARRIVE/.test(c));
+  });
+  if (at < 0) return null;
+  const head = headerIndex(rows[at].cells);
+  const col = (test) => head.findIndex(test);
+  const cName = col((c) => c === 'GUEST NAME');
+  const cRoom = col((c) => /^RM\s*#|^ROOM/.test(c));
+  const cArrive = col((c) => /^ARRIV/.test(c));
+  const cDepart = col((c) => /^DEPART/.test(c));
+  const cPax = col((c) => /#\s*GSTS|GUESTS|PAX/.test(c));
+  const cNote = col((c) => /REQUESTS?\/COMN?T|COMMENT/.test(c));
+  let businessDate = null;
+  for (const r of rows.slice(0, at)) {
+    const i = r.cells.findIndex((c) => /^BUSINESS DATE/i.test(c));
+    if (i >= 0) businessDate = parseDay(r.cells.slice(i + 1).find((x) => x) || '');
+  }
+  const near = businessDate || todayIso();
+  const out = [];
+  let ignored = at + 1;
+  for (const r of rows.slice(at + 1)) {
+    const nameCell = (r.cells[cName] || '').trim();
+    const roomCell = (r.cells[cRoom] || '').trim();
+    // Guest lines have a "LAST/FIRST" name or a room; heading lines, totals and "END OF REPORT" do not.
+    // A guest without a room yet is kept, so the preview can show it.
+    if (!nameCell || /^(TOTAL|END OF|PAGE)/i.test(nameCell) || !(/^\d{3,4}$/.test(roomCell) || nameCell.includes('/'))) { ignored++; continue; }
+    const { fullName, tierRaw } = requestName(nameCell);
+    const tier = tierRaw ? tierOf(tierRaw) : null;
+    const pax = cPax >= 0 ? peopleCount(r.cells[cPax]) : null;
+    out.push({
+      line: r.where, fullName, room: roomCell, tierRaw, rank: tier === 'DIAMOND' || tier === 'GOLD' ? tier : null,
+      arrive: cArrive >= 0 ? parseDay(r.cells[cArrive], near) : null,
+      depart: cDepart >= 0 ? parseDay(r.cells[cDepart], near) : null,
+      pax: Math.min(20, Math.max(1, pax ?? 1)),
+      note: cNote >= 0 ? (r.cells[cNote] || '').trim() : '',
+    });
+  }
+  if (!out.length) throw new Error('This request report has no guests in it.');
+  return { rows: out, ignored, businessDate, source: 'Opera request report' };
+}
+
+// ---------- Which list is this file? ----------
+
+// Returns { kind: 'breakfast' | 'tier' | 'comp', data } when the headings make it clear, otherwise { kind: null }.
+export function recognise(book) {
+  const order = [book.active, ...book.sheets.map((_, i) => i).filter((i) => i !== book.active)].filter((i) => book.sheets[i]);
+  for (const i of order) {
+    const data = readOperaPackage(book.sheets[i].rows);
+    if (data) return { kind: 'breakfast', data };
+  }
+  const tier = readTierBook(book);
+  if (tier) return { kind: 'tier', data: tier };
+  for (const i of order) {
+    const data = readRequestReport(book.sheets[i].rows);
+    if (data) return { kind: 'comp', data };
+  }
+  return { kind: null };
+}
+
+// A plain list (one guest per line) read for a particular box.
+export function readPlainList(book, kind) {
+  const parsed = extractGuests(book.lines);
+  if (kind === 'breakfast') return { ...parsed, source: '' };
+  if (kind === 'tier') {
+    const rows = parsed.rows.map((r) => ({ line: r.line, room: r.room, fullName: r.fullName, tierRaw: r.rankRaw, tier: tierOf(r.rankRaw) || 'OTHER', pax: 1, stay: '' }));
+    return { sheets: [{ index: 0, name: 'List', rows, ignored: parsed.ignored, date: null }], pick: 0, source: '' };
+  }
+  return { rows: parsed.rows.map((r) => ({ line: r.line, fullName: r.fullName, room: r.room, tierRaw: r.rankRaw, rank: r.rank === 'DIAMOND' || r.rank === 'GOLD' ? r.rank : null, arrive: null, depart: null, pax: 1, note: '' })), ignored: parsed.ignored, source: '' };
+}
+
+// ---------- One guest per line (TXT, PDF, simple lists) ----------
+//
+// On every line we look for:
+//   - a room number   (3–4 digits, e.g. 512 or 1208)
+//   - a membership    (Diamond, Gold, Silver or Member — Silver counts as Member)
+//   - the guest name  (the remaining words, in the order they are written)
+// So "Maria Rossi 512 Gold", "512 | Rossi, Maria | GOLD" and "Gold  Maria Rossi  Room 512" all work.
 
 // Words that describe a column rather than being part of a name.
 const FILLER = new Set(['room', 'rm', 'no', 'nr', 'num', 'number', 'floor', 'guest', 'guests', 'name', 'names', 'first', 'last',
@@ -298,7 +484,6 @@ function parseLine(text, lastNameFirst = false) {
 // Turns file lines into guest rows for the preview.
 // Lines with no guest information at all (titles, headings, page numbers) are ignored.
 export function extractGuests(lines) {
-  if (lines.prepared) return lines.prepared;
   const rows = [];
   let ignored = 0;
   let lastNameFirst = false;
@@ -315,7 +500,7 @@ export function extractGuests(lines) {
       ignored++;
       continue;
     }
-    rows.push({ line: where, fullName: p.fullName, room: p.room || p.badRoom || '', rankRaw: p.rankRaw, rank: p.rank });
+    rows.push({ line: where, fullName: p.fullName, room: p.room || p.badRoom || '', rankRaw: p.rankRaw, rank: p.rank, pax: 1 });
   }
   if (!rows.length) {
     throw new Error('No guests were found. Each line should have the guest’s name, room number and membership, for example: Maria Rossi 512 Gold');

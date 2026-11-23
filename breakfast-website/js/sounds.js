@@ -70,6 +70,8 @@ const SOUNDS = {
   },
   // Two bright glass notes, a fifth apart.
   checkin: () => { glass(84, 0, 0.14, 0.9); glass(91, 0.07, 0.1, 1.0); },
+  // A soft rising fourth: "this room is already registered, let them in".
+  note: () => { glass(79, 0, 0.1, 0.9); glass(84, 0.12, 0.08, 1.0); },
   // A gentle falling third: noticeable but never harsh.
   warn: () => {
     tone({ f: hz(64), type: 'triangle', d: 0.22, v: 0.18, lp: 2000 });
