@@ -1,6 +1,6 @@
 // Offline support: keeps a copy of the whole app on the tablet.
 // Generated list of files; the version changes whenever any file changes, so updates are picked up.
-const VERSION = 'd8e4ada55a';
+const VERSION = 'd8e4ada55b';
 const CACHE = 'breakfast-app-' + VERSION;
 const FONT_CACHE = 'breakfast-fonts';
 const FILES = [
