@@ -73,11 +73,11 @@ export async function renderPrepare() {
             <div class="dz-text">Tap a list or drop files here · Excel, PDF or TXT</div>
           </div>
         </div>
-        <div class="slots">
-          ${LISTS.map((s, i) => html`<button type="button" class="slot" data-slot="${s.kind}">
-            <span class="slot-n">${i + 1}</span>
-            <span class="slot-text"><b>${s.title}</b><small>${s.hint}</small></span>
-            <span class="slot-plus" aria-hidden="true">${icons.plus}</span>
+        <div class="il-list">
+          ${LISTS.map((s, i) => html`<button type="button" class="il-item" data-slot="${s.kind}">
+            <span class="il-n">${i + 1}</span>
+            <span class="il-text"><b>${s.title}</b><small>${s.hint}</small></span>
+            <span class="il-plus" aria-hidden="true">${icons.plus}</span>
           </button>`)}
         </div>
         <span class="dz-text small">Typing a list yourself? <a href="#" id="template-link">Download a TXT template</a></span>
@@ -347,7 +347,7 @@ export async function renderPrepare() {
   });
 
   const choose = (kind) => { pickFor = kind; fileInput.click(); };
-  el.querySelector('.slots').addEventListener('click', (e) => {
+  el.querySelector('.il-list').addEventListener('click', (e) => {
     const b = e.target.closest('[data-slot]');
     if (b) choose(b.dataset.slot);
   });
@@ -459,10 +459,10 @@ export async function renderPrepare() {
   function slotView(list, i, r) {
     const file = imp.files[list.kind];
     if (!file) {
-      return html`<button type="button" class="imp-slot empty" data-add="${list.kind}">
-        <span class="slot-n">${i + 1}</span>
-        <span class="slot-text"><b>${list.title}</b><small>${list.empty}</small></span>
-        <span class="slot-plus" aria-hidden="true">${icons.plus}</span></button>`;
+      return html`<button type="button" class="il-row empty" data-add="${list.kind}">
+        <span class="il-n">${i + 1}</span>
+        <span class="il-text"><b>${list.title}</b><small>${list.empty}</small></span>
+        <span class="il-plus" aria-hidden="true">${icons.plus}</span></button>`;
     }
     const d = file.data;
     const today = todayIso();
@@ -491,18 +491,18 @@ export async function renderPrepare() {
       const rooms = new Set(d.rows.map((x) => x.room)).size;
       facts = [d.source, `${plural(d.rows.length, 'guest')} in ${plural(rooms, 'room')}`].filter(Boolean).join(' · ');
     }
-    return html`<div class="imp-slot">
-      <span class="slot-n done">${CHECK_SVG}</span>
-      <div class="slot-text">
+    return html`<div class="il-row">
+      <span class="il-n done">${CHECK_SVG}</span>
+      <div class="il-text">
         <b>${list.title}</b>
         <small class="file-name">${file.fileName}</small>
         <small>${facts}</small>
         ${extra}
-        ${warn ? html`<div class="slot-warn">${warn.text}${warn.day ? html` <button type="button" class="link-btn small" data-day="${warn.day}">Use ${fmtDay(warn.day)}</button>` : ''}</div>` : ''}
+        ${warn ? html`<div class="il-warn">${warn.text}${warn.day ? html` <button type="button" class="link-btn small" data-day="${warn.day}">Use ${fmtDay(warn.day)}</button>` : ''}</div>` : ''}
       </div>
-      <span class="slot-actions">
+      <span class="il-actions">
         <button type="button" class="btn btn-ghost btn-sm" data-add="${list.kind}">Change</button>
-        <button type="button" class="btn btn-ghost btn-sm slot-x" data-remove-file="${list.kind}" title="Remove this file" aria-label="Remove ${list.title}">✕</button>
+        <button type="button" class="btn btn-ghost btn-sm il-x" data-remove-file="${list.kind}" title="Remove this file" aria-label="Remove ${list.title}">✕</button>
       </span>
     </div>`;
   }
@@ -525,7 +525,7 @@ export async function renderPrepare() {
     if (r.changed.length) happened.push(html`<li><b>${plural(r.changed.length, 'guest')}</b> already on your list will be updated (tier or people)</li>`);
     const hasFiles = Object.keys(f).length > 0;
     return html`
-      <div class="imp-slots">${LISTS.map((list, i) => slotView(list, i, r))}</div>
+      <div class="il-group">${LISTS.map((list, i) => slotView(list, i, r))}</div>
       ${hasFiles ? html`
         <div class="summary" style="margin-top:16px">
           <div class="summary-row total"><span>Guests ready to import</span><b>${r.fresh.length}</b></div>
