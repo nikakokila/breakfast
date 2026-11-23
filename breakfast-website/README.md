@@ -4,7 +4,7 @@ This is the stand-alone version for **one shared Android tablet**. It needs no l
 
 - All accounts, shifts and statistics are saved **on the tablet itself**.
 - It works **without internet** once installed.
-- It has the same screens as the laptop version: guest list import (TXT/PDF), check-in, unknown guests, late guests, finish shift, previous shifts, analytics, CSV exports, delete shift with a code.
+- It has the same screens as the laptop version: guest list import (Opera Excel report, TXT, PDF or CSV), check-in, unknown guests, late guests, finish shift, previous shifts, analytics, CSV exports, delete shift with a code.
 
 The app's *code* is put on a free website (GitHub Pages) only so the tablet can install it. **No guest data ever goes there.**
 
